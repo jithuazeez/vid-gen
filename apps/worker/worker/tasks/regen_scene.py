@@ -41,13 +41,13 @@ def regen_scene(self, project_id: str, scene_id: str,
 
     publish_event(project_id, "stage_change", {"stage": "scene", "scene_id": scene_id})
     ltx_render.remote(project_id=project_id, scene_id=scene_id)
-    generate_voice.remote(project_id=project_id, scene_id=scene_id, language=lang)
-    # Gate musetalk at the task level too — symmetric with render_project,
-    # avoids paying container spin-up when there's no speaker.
+    # Speaker scenes get TTS + lipsync + subtitle alignment. Non-speaker
+    # scenes use LTX-2's native audio and skip the entire voice chain.
     if scene.get("has_speaker"):
+        generate_voice.remote(project_id=project_id, scene_id=scene_id, language=lang)
         musetalk_sync.remote(project_id=project_id, scene_id=scene_id,
                              language=lang, has_speaker=True)
-    whisper_align.remote(project_id=project_id, scene_id=scene_id, language=lang)
+        whisper_align.remote(project_id=project_id, scene_id=scene_id, language=lang)
     composite_result = ffmpeg_composite.remote(
         project_id=project_id, scene_id=scene_id, language=lang,
     )

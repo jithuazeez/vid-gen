@@ -36,9 +36,6 @@ class Settings(BaseSettings):
     modal_token_secret: str = ""
     modal_app_name: str = "vidplatform"
 
-    music_provider: Literal["acestep", "magenta"] = "acestep"
-    acestep_model_revision: str = "main"
-
     modal_global_cost_cap_usd: float = Field(default=25.0, ge=0)
     modal_per_project_cost_cap_usd: float = Field(default=1.5, ge=0)
 

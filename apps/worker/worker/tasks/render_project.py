@@ -1,7 +1,9 @@
 """Phase B controller: full render of the primary language.
 
-Architecture.md §8 DAG. Per scene: voice → (gated)lipsync → subtitles → composite.
-We await whisper_align before composite because composite burns in the SRT.
+Architecture.md §8 DAG. Per scene the audio path is gated on
+``scene.has_speaker``: speaker scenes run voice → lipsync → subtitles →
+composite, non-speaker scenes skip the voice/lipsync/subs chain and let
+composite mux LTX-2's native_audio onto the silent scene_video.
 
 Every Modal call is logged with stage + scene + call_id on entry, exit, and
 exception. On failure: the job row is marked `failed` with a structured error
@@ -10,7 +12,6 @@ Celery records the traceback.
 """
 from __future__ import annotations
 
-import os
 import time
 import traceback
 
@@ -22,7 +23,6 @@ from worker.asset_urls import signed_url_for_asset
 from worker.celery_app import celery_app
 from worker import manifest
 from worker.modal_client import (
-    acestep_music,
     ffmpeg_composite,
     final_export,
     generate_voice,
@@ -140,7 +140,7 @@ def render_project(self, project_id: str, language: str | None = None,
              scene_ids=[str(s["id"]) for s in scenes])
 
     try:
-        # ─── Phase B-1: visuals (LTX) + music (ACE-Step) in parallel ────
+        # ─── Phase B-1: visuals (LTX-2) ─────────────────────────────────
         publish_event(project_id, "stage_change", {"stage": "scenes"})
         db.update_job(job_id, current_stage="scenes")
         log.info("phase.b1.start", project_id=project_id, job_id=job_id)
@@ -165,19 +165,8 @@ def render_project(self, project_id: str, language: str | None = None,
                      modal_call_id=_call_id(call))
             visual_calls.append((s, call))
 
-        music_call = None
-        music_disabled = os.environ.get("MUSIC_DISABLE") == "1"
-        if project.get("music_enabled") and not music_disabled:
-            publish_event(project_id, "stage_change", {"stage": "music"})
-            music_call = acestep_music.spawn(project_id=project_id)
-            log.info("acestep.spawn", project_id=project_id,
-                     modal_call_id=_call_id(music_call))
-        elif music_disabled:
-            log.info("acestep.skipped_by_env", project_id=project_id)
-
         _record_modal_calls(job_id, {
-            "ltx_render":    [c for c in (_call_id(call) for _, call in visual_calls) if c],
-            "acestep_music": [c for c in [_call_id(music_call)] if c] if music_call else [],
+            "ltx_render": [c for c in (_call_id(call) for _, call in visual_calls) if c],
         })
 
         for scene, call in visual_calls:
@@ -188,22 +177,6 @@ def render_project(self, project_id: str, language: str | None = None,
             publish_event(project_id, "scene_ready",
                           {"scene_id": sid, "kind": "scene_video",
                            "asset_id": aid, "asset_url": signed_url_for_asset(aid)})
-        if music_call is not None:
-            # Music is optional content. If acestep dies, log the failure
-            # loudly but keep rendering — a video without background music
-            # is still a valid result.
-            try:
-                _await(music_call, stage="acestep_music",
-                       project_id=project_id, job_id=job_id)
-            except Exception as e:
-                log.warning("acestep.failed_continuing_without_music",
-                            project_id=project_id, job_id=job_id,
-                            error=str(e), error_type=type(e).__name__)
-                publish_event(project_id, "warning", {
-                    "stage": "acestep_music",
-                    "message": "music generation failed — continuing without music",
-                    "error_type": type(e).__name__,
-                })
         publish_event(project_id, "progress", {"percent": 40})
         log.info("phase.b1.done", project_id=project_id, job_id=job_id)
 
@@ -215,18 +188,21 @@ def render_project(self, project_id: str, language: str | None = None,
         total = max(1, len(scenes))
         for idx, s in enumerate(scenes):
             sid = str(s["id"])
+            has_speaker = bool(s.get("has_speaker"))
             log.info("scene.pipeline.start", project_id=project_id, job_id=job_id,
-                     scene_id=sid, scene_index=idx)
+                     scene_id=sid, scene_index=idx, has_speaker=has_speaker)
 
-            vc = generate_voice.spawn(project_id=project_id, scene_id=sid, language=lang)
-            log.info("voice.spawn", project_id=project_id, scene_id=sid,
-                     modal_call_id=_call_id(vc))
-            _await(vc, stage="voice", project_id=project_id, job_id=job_id,
-                   scene_id=sid, extra={"language": lang})
-            publish_event(project_id, "asset_progress",
-                          {"asset_type": "voice", "scene_id": sid, "percent": 100})
+            # Voice + lipsync + subtitles only run for speaker scenes.
+            # Non-speaker scenes use LTX-2's native audio directly in composite.
+            if has_speaker:
+                vc = generate_voice.spawn(project_id=project_id, scene_id=sid, language=lang)
+                log.info("voice.spawn", project_id=project_id, scene_id=sid,
+                         modal_call_id=_call_id(vc))
+                _await(vc, stage="voice", project_id=project_id, job_id=job_id,
+                       scene_id=sid, extra={"language": lang})
+                publish_event(project_id, "asset_progress",
+                              {"asset_type": "voice", "scene_id": sid, "percent": 100})
 
-            if s.get("has_speaker"):
                 ls = musetalk_sync.spawn(project_id=project_id, scene_id=sid,
                                           language=lang, has_speaker=True)
                 log.info("musetalk.spawn", project_id=project_id, scene_id=sid,
@@ -235,16 +211,16 @@ def render_project(self, project_id: str, language: str | None = None,
                        job_id=job_id, scene_id=sid, extra={"language": lang})
                 publish_event(project_id, "asset_progress",
                               {"asset_type": "lipsync_video", "scene_id": sid, "percent": 100})
-            else:
-                log.info("musetalk.skip_no_speaker", project_id=project_id, scene_id=sid)
 
-            sub = whisper_align.spawn(project_id=project_id, scene_id=sid, language=lang)
-            log.info("whisper.spawn", project_id=project_id, scene_id=sid,
-                     modal_call_id=_call_id(sub))
-            _await(sub, stage="whisper_align", project_id=project_id,
-                   job_id=job_id, scene_id=sid, extra={"language": lang})
-            publish_event(project_id, "asset_progress",
-                          {"asset_type": "subtitle_srt", "scene_id": sid, "percent": 100})
+                sub = whisper_align.spawn(project_id=project_id, scene_id=sid, language=lang)
+                log.info("whisper.spawn", project_id=project_id, scene_id=sid,
+                         modal_call_id=_call_id(sub))
+                _await(sub, stage="whisper_align", project_id=project_id,
+                       job_id=job_id, scene_id=sid, extra={"language": lang})
+                publish_event(project_id, "asset_progress",
+                              {"asset_type": "subtitle_srt", "scene_id": sid, "percent": 100})
+            else:
+                log.info("scene.audio.native_only", project_id=project_id, scene_id=sid)
 
             cc = ffmpeg_composite.spawn(project_id=project_id, scene_id=sid, language=lang)
             log.info("composite.spawn", project_id=project_id, scene_id=sid,

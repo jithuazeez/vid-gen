@@ -59,19 +59,22 @@ sdxl_image = _cpu_base.pip_install(
     "torch==2.4.0", "diffusers==0.30.3", "transformers==4.45.2",
     "accelerate==0.34.2", "safetensors==0.4.5",
 ).add_local_python_source("apps")
-# LTX-Video 0.9.x via diffusers. We tried Lightricks's native LTX-2.3
-# pipeline (`ltx-core` + `ltx-pipelines`) and gave up after three
-# cascading upstream packaging bugs in a row (CUDA-13 torchaudio in their
-# loose pins, an unshipped `multigpu/` subdirectory, a transformers
-# SiglipVisionModel.vision_model rename). The 0.9.x line is older and
-# weaker on motion, but it loads cleanly via stock diffusers and we can
-# squeeze quality out of it via prompt design + an optional LoRA.
+# LTX-2 (19B) via diffusers `LTX2ConditionPipeline`. Pinned by commit SHA
+# because the pipeline lives on diffusers main and the API is still
+# settling — a floating pin will eventually bite us.
+LTX2_DIFFUSERS_REF = os.environ.get(
+    "LTX2_DIFFUSERS_REF",
+    "git+https://github.com/huggingface/diffusers.git@main",
+)
 ltx_image = (
     _cpu_base.pip_install(
-        "torch==2.4.0", "diffusers==0.32.2", "transformers==4.45.2",
-        "imageio[ffmpeg]==2.36.0", "accelerate==0.34.2", "sentencepiece==0.2.0",
-        "peft>=0.13",  # required by diffusers' LoRA loader
+        "torch==2.5.1", "torchaudio==2.5.1",
+        "transformers==4.46.3", "tokenizers>=0.20",
+        "imageio[ffmpeg]==2.36.0", "accelerate==1.1.1",
+        "sentencepiece==0.2.0", "soundfile>=0.12",
+        "peft>=0.13",
     )
+    .pip_install(LTX2_DIFFUSERS_REF)
     .env({
         "HF_HOME": "/models/hf",
         "HUGGINGFACE_HUB_CACHE": "/models/hf",
@@ -98,34 +101,6 @@ whisper_image = (
             "/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:"
             "/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib"
         ),
-    })
-    .add_local_python_source("apps")
-)
-acestep_image = (
-    _cpu_base.apt_install("git")
-    .pip_install(
-        "torch==2.4.0", "torchaudio==2.4.0",
-        "transformers==4.45.2", "diffusers==0.30.3",
-        "soundfile==0.12.1", "accelerate==0.34.2", "librosa==0.10.2",
-        "huggingface_hub>=0.24",
-    )
-    .pip_install("git+https://github.com/ace-step/ACE-Step.git@main")
-    # ACE-Step pulls flash-attn (and on main, FlashAttention-3) wheels
-    # built against torch>=2.5. Their op signatures use PEP-604
-    # `Tensor | None`, which torch 2.4's torch.library.infer_schema
-    # can't parse — every container blows up at import time with
-    # "Parameter q has unsupported type torch.Tensor".
-    # Strip every flash-attn variant; ACE-Step falls back to torch's
-    # native SDPA when none of them are importable. The env vars are a
-    # belt-and-braces so transformers/diffusers don't try to opt in.
-    .run_commands(
-        "pip uninstall -y flash-attn flash-attn-3 flashattn-hopper "
-        "flash_attn flash_attn_3 || true"
-    )
-    .env({
-        "DISABLE_FLASH_ATTN": "1",
-        "TRANSFORMERS_NO_FLASH_ATTN": "1",
-        "FLASH_ATTENTION_DISABLE": "1",
     })
     .add_local_python_source("apps")
 )
@@ -175,7 +150,7 @@ def sdxl_character_ref(project_id: str, character_id: str, name: str,
 
 
 @app.function(image=ltx_image, gpu="A100-40GB", volumes={"/models": models_volume},
-              secrets=secrets, timeout=600)
+              secrets=secrets, timeout=900)
 def ltx_render(project_id: str, scene_id: str) -> dict:
     from apps.modal_app.functions import scene_video
 
@@ -206,14 +181,6 @@ def whisper_align(project_id: str, scene_id: str, language: str) -> dict:
     from apps.modal_app.functions import subtitles
 
     return subtitles.run(project_id, scene_id, language)
-
-
-@app.function(image=acestep_image, gpu="A10G", volumes={"/models": models_volume},
-              secrets=secrets, timeout=240)
-def acestep_music(project_id: str) -> dict | None:
-    from apps.modal_app.functions import music
-
-    return music.run(project_id)
 
 
 @app.function(image=mediapipe_image, cpu=2, secrets=secrets, timeout=60)

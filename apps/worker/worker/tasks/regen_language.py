@@ -1,7 +1,9 @@
-"""Cheap language switch — reuses cached visuals + music.
+"""Cheap language switch — reuses cached visuals + native audio.
 
 Architecture.md §10. ~10–20% of initial render cost per added language.
-Same per-scene order as render_project: voice → (lipsync) → subs → composite.
+Same per-scene order as render_project, gated on `has_speaker`: speaker
+scenes run voice → lipsync → subs → composite; non-speaker scenes go
+straight to composite (LTX-2's native audio is language-agnostic).
 """
 from __future__ import annotations
 
@@ -72,21 +74,21 @@ def regen_language(self, project_id: str, language: str,
     for s in scenes:
         sid = str(s["id"])
 
-        generate_voice.spawn(project_id=project_id, scene_id=sid, language=language).get()
-        publish_event(project_id, "asset_progress",
-                      {"asset_type": "voice", "scene_id": sid, "language": language, "percent": 100})
-
         if s.get("has_speaker"):
+            generate_voice.spawn(project_id=project_id, scene_id=sid, language=language).get()
+            publish_event(project_id, "asset_progress",
+                          {"asset_type": "voice", "scene_id": sid, "language": language, "percent": 100})
+
             musetalk_sync.spawn(project_id=project_id, scene_id=sid,
                                 language=language, has_speaker=True).get()
             publish_event(project_id, "asset_progress",
                           {"asset_type": "lipsync_video", "scene_id": sid,
                            "language": language, "percent": 100})
 
-        whisper_align.spawn(project_id=project_id, scene_id=sid, language=language).get()
-        publish_event(project_id, "asset_progress",
-                      {"asset_type": "subtitle_srt", "scene_id": sid,
-                       "language": language, "percent": 100})
+            whisper_align.spawn(project_id=project_id, scene_id=sid, language=language).get()
+            publish_event(project_id, "asset_progress",
+                          {"asset_type": "subtitle_srt", "scene_id": sid,
+                           "language": language, "percent": 100})
 
         composite_calls.append((sid, ffmpeg_composite.spawn(
             project_id=project_id, scene_id=sid, language=language,

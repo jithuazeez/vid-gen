@@ -4,7 +4,7 @@
 
 ## 1. Overview
 
-A platform that generates cinematic multilingual videos from a chat-driven brief. The user describes what they want, the system collects a structured spec conversationally, plans scenes, generates visuals + narration + (gated) lip-sync + subtitles + overlays + background music, and produces export-ready MP4s. Language can be switched without regenerating visual scenes.
+A platform that generates cinematic multilingual videos from a chat-driven brief. The user describes what they want, the system collects a structured spec conversationally, plans scenes, generates visuals + narration + (gated) lip-sync + subtitles + overlays, and produces export-ready MP4s. Audio per scene is gated on `has_speaker`: speaker scenes get TTS narration + MuseTalk lip-sync, non-speaker scenes use LTX-2's native audio output. Language can be switched without regenerating visual scenes.
 
 **Target languages:** English, Hindi, Marathi, Tamil, Punjabi.
 
@@ -26,7 +26,7 @@ A platform that generates cinematic multilingual videos from a chat-driven brief
 - Translation via Sarvam Translate
 - Face-aware subtitle positioning (MediaPipe)
 - Animated text overlays as a first-class timeline track
-- AI-generated background music (**ACE-Step 1.5**, Apache-2.0), one track per project; Magenta RealTime wired as fallback behind the same `MusicProvider` Protocol
+- Per-scene audio: speaker scenes use Sarvam TTS + MuseTalk lip-sync; non-speaker scenes use LTX-2's native audio output (no separate background music generation)
 - Export to MP4 at 720p or 1080p, with burned-in or sidecar SRT
 - Per-scene regeneration
 - Render state tracking with SSE progress updates
@@ -41,7 +41,7 @@ A platform that generates cinematic multilingual videos from a chat-driven brief
 - Mobile-optimised review screen (desktop only; chat + storyboard work on mobile)
 - User accounts, multi-tenant auth
 - Undo history (project versioning)
-- Audio mixing beyond a single music volume slider
+- Background music generation and any audio mixing beyond the per-scene voice/native-audio swap
 
 ---
 
@@ -84,7 +84,6 @@ Three services + shared infra. API is stateless and CPU-light. **Celery worker**
        │  Bulbul-v2 TTS    │                       │  ltx_render      A100 40GB │
        └───────────────────┘                       │  sdxl_image      A10G      │
                                                    │  musetalk_sync   A10G      │
-                                                   │  acestep_music   A10G      │
                                                    │  whisper_align   T4        │
                                                    │  mediapipe_face  CPU       │
                                                    │  ffmpeg_composite CPU      │
@@ -133,12 +132,12 @@ This split lets us debug controller logic without re-deploying Modal, and re-tun
 | DB | Postgres 16 on the OCI Ampere A1 VM, or OCI Autonomous DB (Always-Free, 20 GB) | Single source of truth |
 | Object store | AWS S3 free tier *or* OCI Object Storage with the S3-compatibility API (Always-Free 20 GB) | Code against `boto3`; S3-compat means a single client works for both |
 | Translation + TTS | Sarvam Translate + Bulbul-v2 (cloud API) | SOTA for 5 Indian langs |
-| Video gen | LTX-Video 13B distilled (FP8) in I2V mode | Fits A100 40 GB, fast |
+| Video gen | LTX-2 19B via `diffusers.LTX2ConditionPipeline` (Stage-1) | A100-40GB with sequential CPU offload; dual-image conditioning (thumbnail at index 0 anchors composition, character_ref at mid-latent index hints identity) |
+| Native scene audio | LTX-2 audio output | Persisted as `native_audio` for non-speaker scenes; speaker scenes use TTS + lip-sync instead |
 | Image gen | SDXL-Turbo | Char refs + storyboard thumbnails |
 | Lip-sync | MuseTalk | Modern, better than Wav2Lip |
 | Subtitle alignment | Whisper large-v3 | Word-level forced alignment |
 | Face detection | MediaPipe Face Detector | CPU, light |
-| Music | **ACE-Step 1.5** (`ACE-Step/Ace-Step1.5` on HF, Apache-2.0, ~3.5B params) | Higher quality than Magenta; Magenta RealTime kept as `MusicProvider` fallback |
 | Compositing | FFmpeg (system binary inside Modal CPU function) | Standard |
 | GPU compute | Modal serverless functions | $30 credit covers MVP |
 | API + Celery hosting | **Oracle Cloud Always-Free Ampere A1** (4 OCPU / 24 GB RAM ARM VM, plus 200 GB block storage) — API + Celery worker run as two `systemd` units in Docker | One VM, $0/month forever |
@@ -150,11 +149,10 @@ The key cost optimisation: each Modal function uses the smallest GPU that holds 
 
 | Function | GPU | Approx VRAM | Modal $/hr (preemptible base) | Notes |
 |---|---|---|---|---|
-| `ltx_render` | A100 40GB | ~12 GB | $2.10 | LTX-Video I2V, ~10 s per clip |
+| `ltx_render` | A100 40GB | ~40 GB | $2.10 | LTX-2 19B I2V with sequential offload, ~30–90 s per clip |
 | `sdxl_image` | A10G | ~7 GB | $1.10 | Char refs + thumbnails, ~1–2 s per image |
 | `musetalk_sync` | A10G | ~4 GB | $1.10 | Gated; only runs when scene.has_speaker |
-| `whisper_align` | T4 | ~3 GB | $0.59 | Forced alignment for subtitles |
-| `acestep_music` | A10G | ~8 GB | $1.10 | ACE-Step 1.5 ~3.5B; once per project, ~30 s |
+| `whisper_align` | T4 | ~3 GB | $0.59 | Forced alignment for subtitles (speaker scenes only) |
 | `mediapipe_face` | CPU | — | ~$0.05 | Sampled face detection |
 | `ffmpeg_composite` | CPU (4 cores) | — | ~$0.05 | Scene composite + final mux |
 
@@ -192,7 +190,7 @@ video-platform/
 │   │   ├── celery_app.py             # broker=Redis, result_backend=Redis
 │   │   ├── tasks/
 │   │   │   ├── render_project.py     # Phase B controller; fan out per-scene work via Modal
-│   │   │   ├── regen_language.py     # Cheap language switch (reuses cached visuals + music)
+│   │   │   ├── regen_language.py     # Cheap language switch (reuses cached visuals + native_audio)
 │   │   │   ├── regen_scene.py        # Per-scene regen (script / prompt / has_speaker change)
 │   │   │   ├── storyboard.py         # Phase A: scene plan + thumbnails fan-out
 │   │   │   └── export.py             # Final encode with target quality/subtitles
@@ -205,19 +203,16 @@ video-platform/
 │   │   ├── functions/
 │   │   │   ├── thumbnails.py         # sdxl_image — thumbnails
 │   │   │   ├── character_refs.py     # sdxl_image — char refs
-│   │   │   ├── scene_video.py        # ltx_render — LTX-Video I2V
+│   │   │   ├── scene_video.py        # ltx_render — LTX-2 I2V (+ native_audio for non-speaker scenes)
 │   │   │   ├── voice.py              # Sarvam Bulbul (CPU; thin API wrapper)
 │   │   │   ├── lipsync.py            # musetalk_sync (gated)
 │   │   │   ├── subtitles.py          # whisper_align + mediapipe_face
-│   │   │   ├── music.py              # acestep_music — ACE-Step 1.5 on A10G
 │   │   │   ├── composite.py          # ffmpeg_composite per scene
 │   │   │   └── export.py             # ffmpeg final mux
-│   │   ├── models/                   # Model loaders (LTX, SDXL, MuseTalk, Whisper, ACE-Step)
-│   │   ├── providers/                # External API adapters + music protocol
+│   │   ├── models/                   # Model loaders (LTX-2, SDXL, MuseTalk, Whisper)
+│   │   ├── providers/                # External API adapters
 │   │   │   ├── sarvam.py
-│   │   │   ├── llm.py                # Gemini wrapper for inside-Modal calls
-│   │   │   ├── acestep.py            # ACE-Step 1.5 — primary MusicProvider
-│   │   │   └── magenta.py            # Magenta RealTime — fallback MusicProvider
+│   │   │   └── llm.py                # Gemini wrapper for inside-Modal calls
 │   │   └── storage.py                # S3 / boto3 helpers
 │   │
 │   └── web/                          # Next.js
@@ -366,7 +361,7 @@ CREATE TABLE assets (
   scene_id UUID REFERENCES scenes(id) ON DELETE CASCADE,
   asset_type TEXT NOT NULL,
     -- thumbnail | character_ref | scene_video | voice | lipsync_video
-    -- | subtitle_srt | music | composite | final_export
+    -- | subtitle_srt | native_audio | composite | final_export
   language TEXT,                           -- null = language-agnostic
   storage_key TEXT NOT NULL,
   content_hash TEXT NOT NULL,              -- sha256 of inputs (idempotency)
@@ -513,25 +508,22 @@ GET    /assets/:id                                                200 { signed_u
                     │  project.primary_language.             │
                     └──────────────────┬─────────────────────┘
                                        │
-        ┌──────────────────────────────┼─────────────────────────────┐
-        ▼                              ▼                             ▼
-┌────────────────┐         ┌────────────────────┐       ┌────────────────────┐
-│ render_scene_  │         │ generate_music     │       │ generate_voice     │
-│ video          │         │ (acestep_music)    │       │ + subtitles        │
-│ (ltx_render)   │ × N     │ once per project   │       │ per scene,         │
-│ per scene      │         │                    │       │ primary_lang only  │
-└───────┬────────┘         └──────────┬─────────┘       └─────────┬──────────┘
-        │                             │                            │
-        │                             │       per scene: voice → (gated)
-        │                             │       lipsync → subtitles (parallel)
-        │                             │                            │
-        └─────────────┬───────────────┴────────────────────────────┘
-                      │
-                      ▼
-            ┌─────────────────────┐
-            │ composite_scene     │  ← per scene, primary_language
-            │ (ffmpeg_composite)  │
-            └─────────────┬───────┘
+        ┌──────────────────────────────┴──────────────────────────────┐
+        ▼                                                              ▼
+┌────────────────┐                                       ┌────────────────────┐
+│ render_scene_  │                                       │ per scene (only if │
+│ video          │                                       │ has_speaker):      │
+│ (ltx_render)   │ × N                                   │ voice → lipsync →  │
+│ + native_audio │ for non-speaker scenes                │ subtitles          │
+└───────┬────────┘                                       └─────────┬──────────┘
+        │                                                          │
+        └───────────────────────────┬──────────────────────────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │ composite_scene     │  ← per scene, primary_language
+                         │ (ffmpeg_composite)  │
+                         └─────────────┬───────┘
                           │
                           ▼
             ┌─────────────────────┐
@@ -566,7 +558,7 @@ For language L (where L != already-rendered):
                      │
                      ▼
       ┌──────────────────────────────┐
-      │ composite_scene(S, L)        │   reuses scene_video + music
+      │ composite_scene(S, L)        │   reuses scene_video + native_audio
       └──────────────┬───────────────┘
                      │
                      ▼
@@ -579,10 +571,10 @@ For language L (where L != already-rendered):
 
 What's NOT regenerated on language switch:
 
-- `scene_video` (LTX-Video output) — reused
+- `scene_video` (LTX-2 output) — reused
+- `native_audio` (LTX-2 audio for non-speaker scenes) — reused (language-agnostic)
 - `character_ref` images — reused
 - `thumbnails` — reused
-- `music` — reused
 - MediaPipe face-detection data — cached on the scene, reused
 
 Roughly 10–20% of the cost of the initial render per language switch.
@@ -658,7 +650,7 @@ def apply_lip_sync(scene_id: str, language: str) -> str | None:
 ```python
 # apps/worker/tasks/render_project.py
 from celery import shared_task, group, chord
-from app.modal_client import ltx_render, generate_music, generate_voice, \
+from app.modal_client import ltx_render, generate_voice, \
     apply_lip_sync, generate_subtitles, composite_scene, final_export
 
 @shared_task(bind=True, autoretry_for=(TransientError,), max_retries=3,
@@ -673,32 +665,31 @@ def render_project(self, project_id: str, language: str) -> str:
     project = db_fetch_project(project_id)
     scenes = db_list_scenes(project_id)
 
-    # 1. Fan out visuals + music in parallel (Modal autoscales each GPU class).
-    #    Each .spawn() returns a Modal FunctionCall; we record the call IDs on
-    #    `render_jobs.modal_call_ids` so cancellation can reach Modal.
+    # 1. Fan out visuals (LTX-2 renders silent video + native_audio for
+    #    non-speaker scenes). Each .spawn() returns a Modal FunctionCall;
+    #    we record the call IDs on `render_jobs.modal_call_ids` so a
+    #    cancellation request can reach Modal.
     visual_calls = [
         ltx_render.spawn(s.id) for s in scenes if not s.scene_video_asset_id
     ]
-    music_call = generate_music.spawn(project_id) if project.music_enabled else None
-    db_record_modal_calls(job.id, visual_calls + ([music_call] if music_call else []))
+    db_record_modal_calls(job.id, visual_calls)
     publish_sse(project_id, "stage_change", {"stage": "scenes"})
 
-    # 2. Wait for visuals + music — these are inputs to composite.
+    # 2. Wait for visuals — input to composite.
     for c in visual_calls:
         c.get()
         publish_sse(project_id, "scene_ready", {"scene_id": c.scene_id})
-    if music_call:
-        music_call.get()
 
-    # 3. Per-scene language pipeline (voice → (lipsync) → subs → composite),
-    #    parallel across scenes. We spawn from the worker thread; Modal
-    #    handles GPU concurrency on its side.
+    # 3. Per-scene language pipeline. Voice/lipsync/subs only run for
+    #    speaker scenes; non-speaker scenes use LTX-2's native_audio
+    #    and go straight to composite.
     publish_sse(project_id, "stage_change", {"stage": "voice"})
     composite_calls = []
     for s in scenes:
-        voice_id = generate_voice.remote(s.id, language)
-        lipsync_id = apply_lip_sync.remote(s.id, language) if s.has_speaker else None
-        generate_subtitles.spawn(s.id, language)         # parallel with composite below
+        if s.has_speaker:
+            generate_voice.remote(s.id, language)
+            apply_lip_sync.remote(s.id, language)
+            generate_subtitles.spawn(s.id, language)
         composite_calls.append(composite_scene.spawn(s.id, language))
     [c.get() for c in composite_calls]
 
@@ -719,7 +710,7 @@ def render_project(self, project_id: str, language: str) -> str:
 # apps/worker/tasks/regen_language.py
 @shared_task(bind=True, autoretry_for=(TransientError,), max_retries=3)
 def regen_language(self, project_id: str, language: str) -> str | None:
-    """Cheap language switch. Reuses all visuals + music."""
+    """Cheap language switch. Reuses all visuals + native_audio."""
     project = db_fetch_project(project_id)
     if language in project.available_languages:
         # Already rendered. Just flip active_language and return — no Modal calls.
@@ -730,14 +721,15 @@ def regen_language(self, project_id: str, language: str) -> str | None:
                         idempotency_key=self.request.id)
     scenes = db_list_scenes(project_id)
 
-    # Same per-scene pipeline as render_project, but visuals + music are skipped
-    # because their content_hash is language-agnostic and already cached.
+    # Same per-scene pipeline as render_project, but visuals + native_audio
+    # are skipped because their content_hash is language-agnostic and
+    # already cached. Voice/lipsync/subs still gate on has_speaker.
     composite_calls = []
     for s in scenes:
-        generate_voice.remote(s.id, language)
         if s.has_speaker:
+            generate_voice.remote(s.id, language)
             apply_lip_sync.remote(s.id, language)
-        generate_subtitles.spawn(s.id, language)
+            generate_subtitles.spawn(s.id, language)
         composite_calls.append(composite_scene.spawn(s.id, language))
     [c.get() for c in composite_calls]
 
@@ -816,68 +808,25 @@ What's regenerated per scene:
 - `generate_voice` (Sarvam Bulbul-v2 in the target language; uses Sarvam Translate first if script is in primary_language)
 - `apply_lip_sync` (only if `scene.has_speaker`)
 - `generate_subtitles` (Whisper alignment on the new voice; reuses cached MediaPipe face data)
-- `composite_scene` (reuses cached `scene_video`, `character_refs`, `music`)
+- `composite_scene` (reuses cached `scene_video` and, for non-speaker scenes, `native_audio`)
 - `final_export` for the new language
 
-What's reused: `scene_video`, `character_ref`, `thumbnail`, `music`, MediaPipe face data.
+What's reused: `scene_video`, `native_audio`, `character_ref`, `thumbnail`, MediaPipe face data.
 
 ---
 
-## 11. Music generation
+## 11. Per-scene audio strategy
 
-Single instrumental track per project, generated once and reused across all language switches. **Primary model: ACE-Step 1.5** (`ACE-Step/Ace-Step1.5` on HuggingFace, Apache-2.0, ~3.5B params). Magenta RealTime kept wired as a fallback behind the same `MusicProvider` Protocol.
+Audio per scene is gated on `scenes.has_speaker`:
 
-### Why ACE-Step 1.5 over Magenta RealTime
+- **Speaker scenes** (`has_speaker = true`) → Sarvam Bulbul-v2 TTS + MuseTalk lip-sync. The narration WAV is muxed into the lip-sync MP4 by MuseTalk; composite passes that through. Whisper-aligned subtitles burn in on top.
+- **Non-speaker scenes** (`has_speaker = false`) → LTX-2's native audio output is captured during the `scene_video` step and registered as a `native_audio` asset alongside the silent MP4. Composite mixes it onto the video. No TTS, no lip-sync, no subtitles for these scenes.
 
-- Stronger musicality and instrumental depth at our duration target (15–60 s).
-- Apache-2.0 weights with batch-friendly inference (Magenta RealTime is streaming-first; we always wanted a single MP3 anyway).
-- Optional lyric conditioning if we ever want it (out of scope for MVP — instrumental only).
-- Cost trade: ~3× larger than Magenta, runs on A10G ($1.10/hr) instead of T4 ($0.59/hr), ~30 s wall time vs ~35 s. ~$0.009 vs ~$0.006 per project. Negligible against the $30 cap.
+Background music generation was removed in the LTX-2 migration — non-speaker scenes carry whatever LTX-2 produces (ambient room tone, footsteps, score-like cues), and there's no separate score track to duck under voice.
 
-### MusicProvider Protocol
+### Cache and language-switch behaviour
 
-```python
-# apps/modal_app/providers/__init__.py
-from typing import Protocol
-
-class MusicProvider(Protocol):
-    def synthesize(self, prompt: str, duration_s: float) -> Path:
-        """Return a local MP3 path for a `duration_s`-second instrumental."""
-```
-
-Two impls:
-
-- `apps/modal_app/providers/acestep.py` → primary, on `acestep_music` Modal fn (A10G).
-- `apps/modal_app/providers/magenta.py` → fallback, on a swap-in `magenta_music` Modal fn (T4). Selected by env `MUSIC_PROVIDER=magenta` if ACE-Step weights or runtime become unstable.
-
-The Modal worker `functions/music.py` resolves the provider at import time so the rest of the pipeline (composite, mixing, ducking) doesn't change.
-
-### Prompt construction
-
-```python
-def music_prompt_from_brief(brief: dict) -> str:
-    style = brief["visual_style"]              # e.g. "cinematic"
-    tone = brief["narration_tone"]             # e.g. "energetic"
-    video_type = brief["video_type"]
-    return (
-      f"Instrumental background music for a {video_type} video. "
-      f"Style: {style}. Mood: {tone}. No vocals. Loopable."
-    )
-```
-
-### Integration notes
-
-- **ACE-Step**: load `ACE-Step/Ace-Step1.5` from HF cached on the Modal Volume; pin `ACESTEP_MODEL_REVISION` env so the demo is reproducible. Single forward pass → MP3 (no chunk concat).
-- **Magenta** (fallback only): streaming loop emits 2-s chunks; concat to single MP3.
-- Both write to `projects/{project_id}/music/main-{content_hash[:8]}.mp3`. `content_hash` includes `provider_name + revision + prompt + duration_s + seed`, so swapping providers invalidates the cache cleanly.
-
-### FFmpeg mixing
-
-- Music at –18 dB relative to voice.
-- Sidechain ducking: when voice is present, music drops another 6 dB (smooth attack/release).
-- Trim/loop music to project duration + 1 s fade-out.
-
-If user disables music (`project.music_enabled = false`), `generate_music` is not invoked and `composite_scene` skips the music input.
+`native_audio` is language-agnostic and stays cached across language switches alongside `scene_video`. Only voice/lipsync/subtitles re-render per language, and only for speaker scenes.
 
 ---
 
@@ -890,7 +839,7 @@ In summary, five screens:
 1. **Chat** — slot-filling with chips, live summary card
 2. **Storyboard** — scene grid with thumbnails, editable script + has_speaker toggle per scene
 3. **Generation progress** — stepper + per-scene status + live preview
-4. **Review & edit** — video player, timeline (scenes / waveform / subtitles / overlays / music), language dropdown, export CTA
+4. **Review & edit** — video player, timeline (scenes / waveform / subtitles / overlays), language dropdown, export CTA
 5. **Export modal** — format + quality + subtitle option
 
 ---
@@ -942,7 +891,7 @@ projects/{project_id}/
   thumbnails/{scene_index}-{content_hash[:8]}.jpg
   character_refs/{character_id}-{content_hash[:8]}.jpg
   scene_videos/{scene_index}-{content_hash[:8]}.mp4
-  music/main-{content_hash[:8]}.mp3
+  native_audio/{scene_index}-{content_hash[:8]}.wav
   voices/{lang}/{scene_index}-{content_hash[:8]}.wav
   lipsync/{lang}/{scene_index}-{content_hash[:8]}.mp4
   subtitles/{lang}/{scene_index}-{content_hash[:8]}.srt
@@ -1050,28 +999,27 @@ cd apps/web && vercel deploy --prod
 | Mobile review screen | Timeline collapses to bottom sheet; not built |
 | User accounts | API has no auth middleware in MVP |
 | Undo history | `project_versions` table snapshotting scenes/overlays |
-| Audio mixing controls beyond music volume | FFmpeg composite already mixes — surface more knobs |
+| Audio mixing controls (per-scene gain, fade in/out) | Composite already passes audio through — surface controls in UI |
 
 ---
 
 ## 17. Open implementation questions
 
-1. **LTX-Video variant.** Default to `ltxv-13b-0.9.7-distilled-fp8` on A100 40GB. If quality of motion is poor, fall back to `ltxv-13b-dev` (FP16). Decide after first end-to-end render test.
-2. **ACE-Step 1.5 batch wrapper.** Single-pass forward inference is the goal. If the HF model card's example pipeline is unstable on Modal A10G, fall back to Magenta RealTime (already wired behind `MusicProvider` Protocol — flip `MUSIC_PROVIDER=magenta`).
-3. **Scene continuity.** Default to last-frame conditioning for scene N+1. Fall back to explicit character refs if identity preservation degrades across >3 consecutive scenes.
-4. **Speech detection in Scene Engine.** Heuristics first (quoted speech, dialogue verbs). Upgrade to Gemini returning `has_speaker: bool` per scene as part of structured output.
-5. **Sarvam rate limits.** Confirm Bulbul-v2 concurrency; batch TTS calls if low.
-6. **FFmpeg concat.** Use the `concat` demuxer with re-encode for safety (mismatched timestamps cause issues with stream-copy concat). Accept the extra encode time.
-7. **Subtitle position auto-decision.** MediaPipe runs on N=5 sampled frames per scene. If face bbox vertical centre is in bottom 33% of frame for ≥3 of 5 frames, choose `top`; else `bottom`.
-8. **Modal cold starts.** A100 cold start is ~30–60 s. For the demo, `modal warm vidplatform` before the interview to pre-spin containers.
-9. **Edit-mode intent confidence threshold.** Empirically tune the < 0.6 cutoff after dogfooding. Too aggressive → annoying clarifications; too loose → wrong action taken.
-10. **Celery worker concurrency.** Start at `--concurrency=4` on the Fly.io shared-cpu-1x. Scene fan-out runs on Modal so Celery is mostly I/O-bound (waiting on `.get()`); 4 in-flight projects fits.
+1. **LTX-2 pin.** `diffusers.LTX2ConditionPipeline` currently lives on `diffusers` main; pin by commit SHA via `LTX2_DIFFUSERS_REF`. Re-pin after each upstream change we adopt.
+2. **Scene continuity.** Default to dual-image conditioning (per-scene thumbnail at index 0, project-wide character_ref at mid-latent index). If identity drift remains an issue across >3 consecutive scenes, increase `LTX2_CHARREF_STRENGTH` from 0.5 toward 0.7.
+3. **Speech detection in Scene Engine.** Heuristics first (quoted speech, dialogue verbs). Upgrade to Gemini returning `has_speaker: bool` per scene as part of structured output.
+4. **Sarvam rate limits.** Confirm Bulbul-v2 concurrency; batch TTS calls if low.
+5. **FFmpeg concat.** Use the `concat` demuxer with re-encode for safety (mismatched timestamps cause issues with stream-copy concat). Accept the extra encode time.
+6. **Subtitle position auto-decision.** MediaPipe runs on N=5 sampled frames per scene. If face bbox vertical centre is in bottom 33% of frame for ≥3 of 5 frames, choose `top`; else `bottom`.
+7. **Modal cold starts.** A100 cold start is ~30–60 s. For the demo, `modal warm vidplatform` before the interview to pre-spin containers.
+8. **Edit-mode intent confidence threshold.** Empirically tune the < 0.6 cutoff after dogfooding. Too aggressive → annoying clarifications; too loose → wrong action taken.
+9. **Celery worker concurrency.** Start at `--concurrency=4` on the Fly.io shared-cpu-1x. Scene fan-out runs on Modal so Celery is mostly I/O-bound (waiting on `.get()`); 4 in-flight projects fits.
 
 ---
 
 ## 18. Implementation order
 
-Build vertically, not horizontally. Get one scene rendering end-to-end before adding language switching, music, or any UI polish.
+Build vertically, not horizontally. Get one scene rendering end-to-end before adding language switching or any UI polish.
 
 | Day | Goal | Test |
 |---|---|---|
@@ -1081,7 +1029,7 @@ Build vertically, not horizontally. Get one scene rendering end-to-end before ad
 | 4 | Multi-scene + final export, driven by `render_project` Celery task fanning out via Modal `.spawn()` | 30-second multi-scene video plays end-to-end |
 | 5 | Lip-sync (gated): MuseTalk integration + Screen 2 speaker toggle | Toggle a scene; lipsync runs only when on |
 | 6 | Language switch: `/regenerate-language` Celery task + dropdown + content-hash cache + edit-mode chat for "switch to Hindi" intent | Switch to Hindi via dropdown AND via chat; second switch instant |
-| 7 | **ACE-Step music** + sidechain ducking + overlays + subtitle editor + edit-mode chat for scene/overlay edits in Screens 2 + 4 | All 5 screens working; chat can edit a scene script and trigger regen |
+| 7 | Overlays + subtitle editor + edit-mode chat for scene/overlay edits in Screens 2 + 4 | All 5 screens working; chat can edit a scene script and trigger regen |
 | 8 | Polish: README, ARCHITECTURE.md cross-links, Modal warm script, Loom recording, deploy on Fly + Modal | Live URL for reviewer + recorded demo |
 
 Cut features aggressively if it slips — the architecture supports them, the submission doesn't have to include them. Recommended cut order if needed: (i) edit-mode chat in Screen 4 (keep in Screen 2), (ii) overlays editor (keep schema, ship one CTA from Timeline), (iii) lip-sync (gating already lets us skip cleanly), (iv) language switch beyond one alt language. Never cut: chat → storyboard → single-scene render → export.
@@ -1202,23 +1150,22 @@ Estimated GPU-seconds per *initial* render of a 30-second, 5-scene video, Englis
 |---|---|---|---|---|---|---|
 | Thumbnails | sdxl_image | A10G | 2 s | 5 | 10 | $0.003 |
 | Char refs | sdxl_image | A10G | 2 s | 2 | 4 | $0.001 |
-| Scene videos | ltx_render | A100 40GB | 10 s | 5 | 50 | $0.029 |
-| Music (ACE-Step 1.5) | acestep_music | A10G | 30 s | 1 | 30 | $0.009 |
-| Voice | sarvam (cloud) | — | — | 5 | — | ~$0.05 (Sarvam) |
-| Subtitles | whisper_align | T4 | 3 s | 5 | 15 | $0.002 |
-| Lip-sync (gated) | musetalk_sync | A10G | 8 s | 2 | 16 | $0.005 |
+| Scene videos | ltx_render | A100 40GB | 60 s | 5 | 300 | $0.175 |
+| Voice (speaker scenes only) | sarvam (cloud) | — | — | ~2 | — | ~$0.02 (Sarvam) |
+| Subtitles (speaker scenes only) | whisper_align | T4 | 3 s | ~2 | 6 | $0.001 |
+| Lip-sync (gated) | musetalk_sync | A10G | 8 s | ~2 | 16 | $0.005 |
 | Composite | ffmpeg_composite | CPU | 4 s | 5 | 20 | $0.001 |
 | Final export | ffmpeg_composite | CPU | 6 s | 1 | 6 | $0.000 |
-| **Total per render** | | | | | | **~$0.10** |
+| **Total per render** | | | | | | **~$0.21** |
 
-Plus container cold-start time (~30–60s on A100, ~10s on smaller GPUs) and the 1.25× US-region multiplier → ~$0.12–0.15 per full demo. **$30 ÷ ~$0.13 ≈ 230 full renders.** Plenty for development + demo, with budget headroom for ACE-Step quality experiments.
+Plus container cold-start time (~30–60s on A100, ~10s on smaller GPUs) and the 1.25× US-region multiplier → ~$0.25–0.30 per full demo. The LTX-2 line item dominates now that the model is 19B with sequential CPU offload.
 
-Each language switch is ~10–20% of the above (only voice + optional lipsync + subs + composite + final export, since visuals + music are content-hash cache hits) → ~$0.015–0.020. Adding all 4 alternative languages costs ~$0.06 per project — trivial.
+Each language switch is ~5–10% of the above (only voice + lipsync + subs + composite + final export for speaker scenes, since visuals + native_audio are content-hash cache hits) → ~$0.01–0.02 per added language.
 
 ### Cost-saving rules of thumb
 
 - `min_containers=0` for everything during development
-- For the live demo, set `min_containers=1` only on `ltx_render` and `sdxl_image` 30 minutes before the interview
+- For the live demo, set `min_containers=1` only on `ltx_render` and `sdxl_image` 30 minutes before the interview (LTX-2 cold start downloads ~40 GB of weights into the volume the first time)
 - Use the Modal dashboard to confirm idle containers shut down after a run
 - Don't render the full 30-second video on every test — test individual stages in isolation first
 
