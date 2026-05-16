@@ -39,7 +39,7 @@ secrets.append(modal.Secret.from_dict({"VIDPLATFORM_VERSION": "0.1.0"}))
 
 _cpu_base = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg", "libsndfile1")
+    .apt_install("ffmpeg", "libsndfile1", "git")
     .pip_install(
         "redis==5.2.0", "boto3==1.35.50",
         "psycopg[binary]==3.2.3", "sqlalchemy==2.0.36",

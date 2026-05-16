@@ -67,7 +67,7 @@ def synthesize_speech(
         return out
 
     body = {
-        "inputs": [text],
+        "text": text,
         "target_language_code": _to_sarvam_code(language),
         "speaker": speaker or _default_speaker(language, tone),
         "model": os.environ.get("SARVAM_TTS_MODEL", "bulbul:v2"),
@@ -83,7 +83,16 @@ def synthesize_speech(
         json=body,
         timeout=60,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        # Surface Sarvam's actual error body and avoid leaking an
+        # httpx.HTTPStatusError across the Modal boundary (it can't be
+        # pickled back to the caller because of required request/response
+        # kwargs on __init__).
+        raise RuntimeError(
+            f"Sarvam TTS {r.status_code} for speaker={body['speaker']!r} "
+            f"lang={body['target_language_code']!r} model={body['model']!r}: "
+            f"{r.text[:500]}"
+        )
     data = r.json()
     audio_b64 = (data.get("audios") or [None])[0]
     if not audio_b64:
@@ -107,15 +116,14 @@ def _to_sarvam_code(code: str) -> str:
 
 
 def _default_speaker(language: str, tone: str) -> str:
-    # Sarvam Bulbul-v2 named speakers; energetic = "anushka", calm = "meera",
-    # authoritative = "arjun", friendly = "amol". Bulbul accepts language-
-    # agnostic speaker names.
+    # bulbul:v2 speakers (lowercase): anushka, abhilash, manisha, vidya,
+    # arya, karun, hitesh.
     return {
         "energetic": "anushka",
-        "calm": "meera",
-        "authoritative": "arjun",
-        "friendly": "amol",
-    }.get(tone, "meera")
+        "calm": "vidya",
+        "authoritative": "karun",
+        "friendly": "hitesh",
+    }.get(tone, "anushka")
 
 
 def _pace_for_tone(tone: str) -> float:
