@@ -1,11 +1,19 @@
 """FFmpeg per-scene composite.
 
-Inputs (all optional except scene_video):
-  - scene_video         (silent MP4 from LTX)
-  - lipsync_video       (lip-sync'd MP4 from MuseTalk; replaces scene_video)
-  - voice               (WAV from Sarvam Bulbul; muxed onto video if no lipsync)
-  - subtitle_srt        (burned in via subtitles filter)
-  - music               (project-wide MP3; ducked under voice)
+Inputs (all optional except a base video):
+  - scene_video         silent MP4 from LTX-2
+  - lipsync_video       lip-sync'd MP4 from MuseTalk; replaces scene_video
+                        and carries the voice track muxed in
+  - voice               WAV from Sarvam Bulbul (used when has_speaker but
+                        lipsync didn't run, e.g. cached pre-lipsync)
+  - native_audio        WAV emitted by LTX-2 for non-speaker scenes
+  - subtitle_srt        burned in via the subtitles filter
+
+Audio source precedence per scene:
+  1. lipsync_video      → keep its embedded audio (voice already muxed)
+  2. voice              → mux the TTS wav onto scene_video
+  3. native_audio       → mux the LTX-2 audio onto scene_video
+  4. silent             → drop audio entirely
 
 Output: composite/{lang}/{scene}-{hash}.mp4
 """
@@ -25,9 +33,9 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
     import os
     h = st.content_hash({
         "scene_id": scene_id, "language": language, "stage": STAGE,
-        # Bumped to v3 when the music-mix levels were rebalanced so older
-        # silent-music composites are not served from cache.
-        "v": os.environ.get("CACHE_VERSION", "v3"),
+        # Bumped to v4 when music was removed and native_audio joined the
+        # precedence ladder.
+        "v": os.environ.get("CACHE_VERSION", "v4"),
     })
     cached = cc.cached_or(h)
     if cached:
@@ -44,25 +52,37 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
                                     asset_type="voice", language=language)
     srt = cc.fetch_asset_by_type(project_id=project_id, scene_id=scene_id,
                                   asset_type="subtitle_srt", language=language)
-    music = cc.fetch_asset_by_type(project_id=project_id, scene_id=None,
-                                    asset_type="music", language=None)
+    native_audio = cc.fetch_asset_by_type(project_id=project_id, scene_id=scene_id,
+                                            asset_type="native_audio", language=None)
 
     base_video_key = (lipsync or sv)["storage_key"] if (lipsync or sv) else None
     if not base_video_key:
         return {"asset_id": None, "error": "no scene video"}
 
     base_video = cc.download_to_tmp(base_video_key)
-    voice_path = cc.download_to_tmp(voice["storage_key"]) if voice else None
     srt_path = cc.download_to_tmp(srt["storage_key"]) if srt else None
-    music_path = cc.download_to_tmp(music["storage_key"]) if music else None
+
+    # Audio source selection — see precedence in the module docstring.
+    audio_path: str | None = None
+    audio_source: str
+    if lipsync is not None:
+        audio_path = None
+        audio_source = "lipsync"
+    elif voice is not None:
+        audio_path = cc.download_to_tmp(voice["storage_key"])
+        audio_source = "voice"
+    elif native_audio is not None:
+        audio_path = cc.download_to_tmp(native_audio["storage_key"])
+        audio_source = "native"
+    else:
+        audio_source = "silent"
 
     out = Path(tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name)
     _run_ffmpeg(
         video_in=base_video,
-        voice_in=voice_path,
-        music_in=music_path,
+        audio_in=audio_path,
+        audio_source=audio_source,
         srt_in=srt_path,
-        srt_use_existing_audio=lipsync is not None,
         out=str(out),
     )
 
@@ -75,6 +95,7 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
         asset_type=STAGE, language=language,
         storage_key=key, content_hash_value=h,
         bytes_=bytes_, mime_type="video/mp4",
+        metadata={"audio_source": audio_source},
     )
     cc.publish(project_id, "asset_progress",
                {"asset_type": STAGE, "scene_id": scene_id,
@@ -84,21 +105,16 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
 
 
 def _run_ffmpeg(
-    *, video_in: str, voice_in: str | None, music_in: str | None,
-    srt_in: str | None, srt_use_existing_audio: bool, out: str,
+    *, video_in: str, audio_in: str | None, audio_source: str,
+    srt_in: str | None, out: str,
 ) -> None:
     cmd = ["ffmpeg", "-y", "-i", video_in]
-    audio_inputs: list[str] = []
-    if voice_in:
-        cmd += ["-i", voice_in]
-        audio_inputs.append(f"{len(audio_inputs) + 1}:a")
-    if music_in:
-        cmd += ["-i", music_in]
-        audio_inputs.append(f"{len(audio_inputs) + 1}:a")
+    if audio_in:
+        cmd += ["-i", audio_in]
 
     filters: list[str] = []
     if srt_in:
-        # Burn captions; escape single quotes in path for FFmpeg filter parser.
+        # Burn captions; escape single quotes in path for ffmpeg's filter parser.
         escaped = srt_in.replace("'", "'\\''")
         filters.append(
             f"[0:v]subtitles='{escaped}':force_style='FontSize=18,Outline=2,"
@@ -107,31 +123,16 @@ def _run_ffmpeg(
     else:
         filters.append("[0:v]copy[vout]")
 
-    audio_label = None
-    if voice_in and music_in:
-        # Music sits at -9 dB under voice and gets a gentle ~6 dB duck
-        # when voice is present (ratio 4, soft knee). Previous settings
-        # (-18 dB + ratio-8 sidechain) made music inaudible in every
-        # narrated scene.
-        filters.append(
-            "[2:a]volume=-9dB[mbg];"
-            "[mbg][1:a]sidechaincompress="
-            "threshold=0.08:ratio=4:attack=20:release=400:makeup=1[mduck];"
-            "[1:a][mduck]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
-            "dynaudnorm=f=200:g=15[aout]"
-        )
-        audio_label = "[aout]"
-    elif voice_in:
+    audio_label: str | None
+    if audio_source == "lipsync":
+        # Voice is already muxed inside the lipsync video.
+        audio_label = "0:a?"
+    elif audio_in is not None:
+        # voice or native_audio — pass through as the sole audio track.
         filters.append("[1:a]anull[aout]")
         audio_label = "[aout]"
-    elif music_in:
-        # Pure music scenes (no narration): keep it audible but a bit
-        # below 0 dBFS to leave headroom.
-        filters.append("[1:a]volume=-6dB[aout]")
-        audio_label = "[aout]"
-    elif srt_use_existing_audio:
-        # No replacement audio; keep whatever was on the video (lipsync includes it).
-        audio_label = "0:a?"
+    else:
+        audio_label = None  # silent output
 
     cmd += ["-filter_complex", ";".join(filters), "-map", "[vout]"]
     if audio_label:

@@ -81,16 +81,6 @@ def scene_video_hash(scene: dict[str, Any], model_revision: str = "ltxv-13b-0.9.
     })
 
 
-def music_hash(project: dict[str, Any], prompt: str, provider: str, revision: str) -> str:
-    return content_hash({
-        "prompt": prompt,
-        "duration_s": float(project.get("duration_seconds") or 30),
-        "provider": provider,
-        "revision": revision,
-        "seed": int(project.get("seed") or 42),
-    })
-
-
 def voice_hash(scene: dict[str, Any], language: str, text_value: str, tone: str) -> str:
     return content_hash({
         "scene_id": str(scene["id"]),

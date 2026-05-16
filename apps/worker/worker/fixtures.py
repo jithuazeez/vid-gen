@@ -35,7 +35,6 @@ _ASSET_TYPE_BY_FN: dict[str, tuple[str, str, str]] = {
     "ltx_render":         ("scene_video",   "mp4", "video/mp4"),
     "musetalk_sync":      ("lipsync_video", "mp4", "video/mp4"),
     "whisper_align":      ("subtitle_srt",  "srt", "application/x-subrip"),
-    "acestep_music":      ("music",         "wav", "audio/wav"),
     "ffmpeg_composite":   ("composite",     "mp4", "video/mp4"),
     "generate_voice":     ("voice",         "wav", "audio/wav"),
     "final_export":       ("final_export",  "mp4", "video/mp4"),
@@ -161,8 +160,8 @@ def _asset_key(
         return f"{base}/character_refs/{character_id}-{short_hash}.{extension}"
     if asset_type == "scene_video":
         return f"{base}/scene_videos/{scene_index}-{short_hash}.{extension}"
-    if asset_type == "music":
-        return f"{base}/music/main-{short_hash}.{extension}"
+    if asset_type == "native_audio":
+        return f"{base}/native_audio/{scene_index}-{short_hash}.{extension}"
     if asset_type == "voice":
         return f"{base}/voices/{language}/{scene_index}-{short_hash}.{extension}"
     if asset_type == "lipsync_video":

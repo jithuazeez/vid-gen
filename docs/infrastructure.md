@@ -131,7 +131,7 @@ Internet
          ▼
   Modal serverless GPU functions
   (ltx_render · sdxl_image · musetalk_sync
-   acestep_music · whisper_align · ffmpeg_composite)
+   whisper_align · ffmpeg_composite)
          │
          ▼
   S3 / OCI Object Storage  (s3-compat API)
