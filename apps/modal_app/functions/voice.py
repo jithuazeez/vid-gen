@@ -5,11 +5,69 @@ target. Pure HTTP — no GPU.
 """
 from __future__ import annotations
 
+import os
+import re
+
 from .. import storage as st
 from ..providers import sarvam
 from . import _common as cc
 
 TTS_MODEL = "bulbul:v2"
+
+
+# ── Speaker-label stripping ────────────────────────────────────────────
+#
+# The script writer often emits screenplay-style narration like
+#   "ALICE: We were lost in the dark."
+#   "Narrator (warm): Once upon a time..."
+#   "[BOB] Wait — listen."
+# The TTS engine reads everything verbatim, so without this scrub the
+# audio (and the Whisper-derived subtitles) start each line with the
+# character's name. Strip the label, leave the spoken line.
+
+_LEADING_LABEL_RE = re.compile(
+    r"""^\s*
+        (?:
+            \[[^\]]{1,40}\]            # [ALICE]
+          | \([^)]{1,40}\)             # (Narrator)
+          | [A-Z][A-Za-z0-9 .'\-]{0,30}(?:\s*\([^)]{1,30}\))?   # ALICE  /  Narrator (warm)
+        )
+        \s*[:—\-]\s+               # colon, em-dash, or hyphen separator
+    """,
+    re.VERBOSE,
+)
+_STAGE_DIR_RE = re.compile(r"\((?:[^)]{1,60})\)")          # (smiling) (V.O.)
+_BRACKET_DIR_RE = re.compile(r"\[(?:[^\]]{1,60})\]")       # [pause] [SFX]
+_WS_RE = re.compile(r"\s+")
+
+
+def clean_for_tts(text: str) -> str:
+    """Remove screenplay speaker labels and parenthetical stage directions.
+
+    Applied per line so multi-line scripts keep their cadence. Conservative:
+    only strips a leading label when followed by a colon/dash separator,
+    so an in-sentence proper noun ("Alice walked in") is preserved.
+    """
+    if not text:
+        return ""
+    cleaned_lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            cleaned_lines.append("")
+            continue
+        # Repeatedly strip nested labels like "NARRATOR (V.O.): Alice: hi"
+        for _ in range(3):
+            new = _LEADING_LABEL_RE.sub("", line)
+            if new == line:
+                break
+            line = new
+        line = _STAGE_DIR_RE.sub("", line)
+        line = _BRACKET_DIR_RE.sub("", line)
+        line = _WS_RE.sub(" ", line).strip(" \t,;-—")
+        if line:
+            cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
 
 
 def run(project_id: str, scene_id: str, language: str) -> dict:
@@ -21,7 +79,8 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
             "as the API and Celery worker, and that migrations are applied."
         )
     source_lang = scene.get("primary_language") or "en"
-    script = scene.get("narration_script") or ""
+    raw_script = scene.get("narration_script") or ""
+    script = clean_for_tts(raw_script)
     tone = (scene.get("brief") or {}).get("narration_tone", "calm")
 
     text = sarvam.translate(script, source_lang=source_lang, target_lang=language)
@@ -29,6 +88,9 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
     h = st.content_hash({
         "scene_id": scene_id, "language": language, "text": text,
         "tone": tone, "model": TTS_MODEL,
+        # Bumped when speaker-label stripping landed so prior renders
+        # that voiced "ALICE: ..." get re-synthesised.
+        "v": os.environ.get("CACHE_VERSION", "v3"),
     })
     cached = cc.cached_or(h)
     if cached:

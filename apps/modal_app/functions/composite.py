@@ -22,8 +22,12 @@ STAGE = "composite"
 
 
 def run(project_id: str, scene_id: str, language: str) -> dict:
+    import os
     h = st.content_hash({
         "scene_id": scene_id, "language": language, "stage": STAGE,
+        # Bumped to v3 when the music-mix levels were rebalanced so older
+        # silent-music composites are not served from cache.
+        "v": os.environ.get("CACHE_VERSION", "v3"),
     })
     cached = cc.cached_or(h)
     if cached:
@@ -105,19 +109,25 @@ def _run_ffmpeg(
 
     audio_label = None
     if voice_in and music_in:
-        # Sidechain duck music under voice (-6 dB during voice).
+        # Music sits at -9 dB under voice and gets a gentle ~6 dB duck
+        # when voice is present (ratio 4, soft knee). Previous settings
+        # (-18 dB + ratio-8 sidechain) made music inaudible in every
+        # narrated scene.
         filters.append(
-            "[2:a]volume=-18dB[mbg];"
-            "[mbg][1:a]sidechaincompress=threshold=0.05:ratio=8:attack=20:release=200[mduck];"
-            "[1:a][mduck]amix=inputs=2:duration=first:dropout_transition=2,"
-            "dynaudnorm=f=200[aout]"
+            "[2:a]volume=-9dB[mbg];"
+            "[mbg][1:a]sidechaincompress="
+            "threshold=0.08:ratio=4:attack=20:release=400:makeup=1[mduck];"
+            "[1:a][mduck]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
+            "dynaudnorm=f=200:g=15[aout]"
         )
         audio_label = "[aout]"
     elif voice_in:
         filters.append("[1:a]anull[aout]")
         audio_label = "[aout]"
     elif music_in:
-        filters.append("[1:a]volume=-18dB[aout]")
+        # Pure music scenes (no narration): keep it audible but a bit
+        # below 0 dBFS to leave headroom.
+        filters.append("[1:a]volume=-6dB[aout]")
         audio_label = "[aout]"
     elif srt_use_existing_audio:
         # No replacement audio; keep whatever was on the video (lipsync includes it).
