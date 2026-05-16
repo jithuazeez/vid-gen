@@ -8,13 +8,16 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.db.models import Subtitle
+from app.db.models import Asset, Subtitle
 from app.schemas import SubtitleCue, SubtitleOut
+from app.storage import s3_client
+from app.settings import get_settings
 
 router = APIRouter(prefix="/subtitles", tags=["subtitles"])
 
@@ -60,6 +63,54 @@ async def get_subtitle_for_scene(
     if sub is None:
         raise HTTPException(status_code=404, detail="subtitle not found")
     return SubtitleOut.model_validate(sub)
+
+
+@router.get("/scene/{scene_id}/{language}/download", response_class=PlainTextResponse)
+async def download_srt(
+    scene_id: uuid.UUID,
+    language: str,
+    fmt: str = "srt",
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Fetch the raw SRT file from S3 and stream it back as text.
+
+    fmt=srt   → original SRT (default)
+    fmt=txt   → strip indices and timestamps, return just the cue text
+    """
+    res = await session.execute(
+        select(Asset).where(
+            Asset.scene_id == scene_id,
+            Asset.language == language,
+            Asset.asset_type == "subtitle_srt",
+        ).order_by(Asset.created_at.desc()).limit(1)
+    )
+    asset = res.scalar_one_or_none()
+    if asset is None:
+        raise HTTPException(404, "subtitle asset not found")
+
+    s = get_settings()
+    obj = s3_client().get_object(Bucket=s.s3_bucket, Key=asset.storage_key)
+    raw = obj["Body"].read().decode("utf-8", errors="replace")
+
+    if fmt == "txt":
+        lines = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.isdigit() or "-->" in line:
+                continue
+            lines.append(line)
+        body = "\n".join(lines)
+        filename = f"scene-{scene_id}-{language}.txt"
+        media = "text/plain"
+    else:
+        body = raw
+        filename = f"scene-{scene_id}-{language}.srt"
+        media = "application/x-subrip"
+
+    return Response(
+        content=body, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 async def _get_or_404(session: AsyncSession, subtitle_id: uuid.UUID) -> Subtitle:

@@ -49,6 +49,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       API_BASE_URL: http://api:8000
       MODAL_STUB: "0"
+      MUSIC_DISABLE: "0"
 
   web:
     build:

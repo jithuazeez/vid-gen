@@ -38,7 +38,11 @@ def translate(text: str, source_lang: str, target_lang: str) -> str:
         },
         timeout=30,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(
+            f"Sarvam Translate {r.status_code} "
+            f"({source_lang}→{target_lang}): {r.text[:500]}"
+        )
     return r.json().get("translated_text") or text
 
 
@@ -83,7 +87,14 @@ def synthesize_speech(
         json=body,
         timeout=60,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        # Surface Sarvam's structured error body instead of httpx's
+        # opaque "Client error '400 Bad Request'". The body tells us
+        # exactly which field (speaker, language code, etc.) was rejected.
+        raise RuntimeError(
+            f"Sarvam TTS {r.status_code} for speaker={body.get('speaker')!r} "
+            f"lang={body.get('target_language_code')!r}: {r.text[:500]}"
+        )
     data = r.json()
     audio_b64 = (data.get("audios") or [None])[0]
     if not audio_b64:
@@ -106,16 +117,31 @@ def _to_sarvam_code(code: str) -> str:
     return _LANG_TO_SARVAM.get(code, code)
 
 
+# Sarvam Bulbul-v2 speaker catalog as of 2026-05-16. The earlier
+# defaults (meera, arjun, amol) were removed/renamed by Sarvam — the
+# API now returns 400 "speaker not recognized" for them. Keep this
+# list in sync with the message body returned on a bad-speaker error:
+#   anushka, abhilash, manisha, vidya, arya, karun, hitesh, aditya,
+#   ritu, priya, neha, rahul, pooja, rohan, simran, kavya, amit, dev,
+#   ishita, shreya, ratan, varun, manan, sumit, roopa, kabir, aayan,
+#   shubh, ashutosh, advait, anand, tanya, tarun, sunny, mani, gokul,
+#   vijay, shruti, suhani, mohit, kavitha, rehan, soham, rupali
+_TONE_TO_SPEAKER = {
+    "energetic":     "anushka",
+    "calm":          "vidya",
+    "authoritative": "karun",
+    "friendly":      "manisha",
+    "warm":          "vidya",
+    "natural":       "vidya",
+}
+_DEFAULT_SPEAKER = "vidya"
+
+
 def _default_speaker(language: str, tone: str) -> str:
-    # Sarvam Bulbul-v2 named speakers; energetic = "anushka", calm = "meera",
-    # authoritative = "arjun", friendly = "amol". Bulbul accepts language-
-    # agnostic speaker names.
-    return {
-        "energetic": "anushka",
-        "calm": "meera",
-        "authoritative": "arjun",
-        "friendly": "amol",
-    }.get(tone, "meera")
+    override = os.environ.get("SARVAM_DEFAULT_SPEAKER")
+    if override:
+        return override
+    return _TONE_TO_SPEAKER.get((tone or "").lower(), _DEFAULT_SPEAKER)
 
 
 def _pace_for_tone(tone: str) -> float:

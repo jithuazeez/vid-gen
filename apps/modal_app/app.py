@@ -28,6 +28,10 @@ def _secret_or_none(name: str) -> modal.Secret | None:
 
 _secret_names = [
     "gemini-api-key", "sarvam-api-key", "aws-s3", "database-url", "redis-url",
+    # Optional — only needed if you point LTX at a LoRA hosted in a
+    # gated HuggingFace repo. The secret is loaded best-effort, so the
+    # function still starts when it isn't configured.
+    "huggingface-token",
 ]
 secrets = [s for s in (_secret_or_none(n) for n in _secret_names) if s is not None]
 secrets.append(modal.Secret.from_dict({"VIDPLATFORM_VERSION": "0.1.0"}))
@@ -55,24 +59,74 @@ sdxl_image = _cpu_base.pip_install(
     "torch==2.4.0", "diffusers==0.30.3", "transformers==4.45.2",
     "accelerate==0.34.2", "safetensors==0.4.5",
 ).add_local_python_source("apps")
-ltx_image = _cpu_base.pip_install(
-    "torch==2.4.0", "diffusers==0.30.3", "transformers==4.45.2",
-    "imageio[ffmpeg]==2.36.0", "accelerate==0.34.2",
-).add_local_python_source("apps")
+# LTX-Video 0.9.x via diffusers. We tried Lightricks's native LTX-2.3
+# pipeline (`ltx-core` + `ltx-pipelines`) and gave up after three
+# cascading upstream packaging bugs in a row (CUDA-13 torchaudio in their
+# loose pins, an unshipped `multigpu/` subdirectory, a transformers
+# SiglipVisionModel.vision_model rename). The 0.9.x line is older and
+# weaker on motion, but it loads cleanly via stock diffusers and we can
+# squeeze quality out of it via prompt design + an optional LoRA.
+ltx_image = (
+    _cpu_base.pip_install(
+        "torch==2.4.0", "diffusers==0.32.2", "transformers==4.45.2",
+        "imageio[ffmpeg]==2.36.0", "accelerate==0.34.2", "sentencepiece==0.2.0",
+        "peft>=0.13",  # required by diffusers' LoRA loader
+    )
+    .env({
+        "HF_HOME": "/models/hf",
+        "HUGGINGFACE_HUB_CACHE": "/models/hf",
+    })
+    .add_local_python_source("apps")
+)
 musetalk_image = _cpu_base.pip_install(
     "torch==2.4.0", "opencv-python-headless==4.10.0.84",
     "ffmpeg-python==0.2.0", "librosa==0.10.2",
 ).add_local_python_source("apps")
-whisper_image = _cpu_base.pip_install(
-    "faster-whisper==1.0.3", "ctranslate2>=4.4.0",
-).add_local_python_source("apps")
-acestep_image = (
+# faster-whisper / ctranslate2 dlopen libcublas.so.12 and libcudnn.so.8 at
+# first GPU call. debian_slim ships neither, so we pull them in as pip
+# wheels and add their lib dirs to LD_LIBRARY_PATH. cuDNN must be the 8.x
+# series — ctranslate2 4.4 links against cuDNN 8, not 9.
+whisper_image = (
     _cpu_base.pip_install(
-        "torch==2.4.0", "transformers==4.45.2", "diffusers==0.30.3",
+        "nvidia-cublas-cu12==12.4.5.8",
+        "nvidia-cudnn-cu12==8.9.7.29",
+        "faster-whisper==1.0.3",
+        "ctranslate2==4.4.0",
+    )
+    .env({
+        "LD_LIBRARY_PATH": (
+            "/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:"
+            "/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib"
+        ),
+    })
+    .add_local_python_source("apps")
+)
+acestep_image = (
+    _cpu_base.apt_install("git")
+    .pip_install(
+        "torch==2.4.0", "torchaudio==2.4.0",
+        "transformers==4.45.2", "diffusers==0.30.3",
         "soundfile==0.12.1", "accelerate==0.34.2", "librosa==0.10.2",
         "huggingface_hub>=0.24",
     )
     .pip_install("git+https://github.com/ace-step/ACE-Step.git@main")
+    # ACE-Step pulls flash-attn (and on main, FlashAttention-3) wheels
+    # built against torch>=2.5. Their op signatures use PEP-604
+    # `Tensor | None`, which torch 2.4's torch.library.infer_schema
+    # can't parse — every container blows up at import time with
+    # "Parameter q has unsupported type torch.Tensor".
+    # Strip every flash-attn variant; ACE-Step falls back to torch's
+    # native SDPA when none of them are importable. The env vars are a
+    # belt-and-braces so transformers/diffusers don't try to opt in.
+    .run_commands(
+        "pip uninstall -y flash-attn flash-attn-3 flashattn-hopper "
+        "flash_attn flash_attn_3 || true"
+    )
+    .env({
+        "DISABLE_FLASH_ATTN": "1",
+        "TRANSFORMERS_NO_FLASH_ATTN": "1",
+        "FLASH_ATTENTION_DISABLE": "1",
+    })
     .add_local_python_source("apps")
 )
 mediapipe_image = _cpu_base.pip_install(

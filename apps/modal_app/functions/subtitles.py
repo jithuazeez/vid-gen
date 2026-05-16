@@ -6,6 +6,8 @@ voice + scene video) and produce one logical asset (the SRT).
 """
 from __future__ import annotations
 
+import os
+
 import math
 import tempfile
 from pathlib import Path
@@ -19,6 +21,7 @@ WHISPER_MODEL = "whisper-large-v3"
 def run(project_id: str, scene_id: str, language: str) -> dict:
     h = st.content_hash({
         "scene_id": scene_id, "language": language, "model": WHISPER_MODEL,
+        "v": os.environ.get("CACHE_VERSION", "v3"),
     })
     cached = cc.cached_or(h)
     if cached:

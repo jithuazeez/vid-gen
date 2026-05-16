@@ -22,6 +22,7 @@ def run(
     h = st.content_hash({
         "project_id": project_id, "language": language,
         "quality": quality, "subtitles": subtitles, "stage": "final_export",
+        "v": os.environ.get("CACHE_VERSION", "v3"),
     })
     cached = cc.cached_or(h)
     if cached:
