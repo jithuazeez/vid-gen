@@ -71,7 +71,7 @@ def synthesize_speech(
         return out
 
     body = {
-        "inputs": [text],
+        "text": text,
         "target_language_code": _to_sarvam_code(language),
         "speaker": speaker or _default_speaker(language, tone),
         "model": os.environ.get("SARVAM_TTS_MODEL", "bulbul:v2"),
@@ -88,12 +88,14 @@ def synthesize_speech(
         timeout=60,
     )
     if r.status_code >= 400:
-        # Surface Sarvam's structured error body instead of httpx's
-        # opaque "Client error '400 Bad Request'". The body tells us
-        # exactly which field (speaker, language code, etc.) was rejected.
+        # Surface Sarvam's actual error body and avoid leaking an
+        # httpx.HTTPStatusError across the Modal boundary (it can't be
+        # pickled back to the caller because of required request/response
+        # kwargs on __init__).
         raise RuntimeError(
-            f"Sarvam TTS {r.status_code} for speaker={body.get('speaker')!r} "
-            f"lang={body.get('target_language_code')!r}: {r.text[:500]}"
+            f"Sarvam TTS {r.status_code} for speaker={body['speaker']!r} "
+            f"lang={body['target_language_code']!r} model={body['model']!r}: "
+            f"{r.text[:500]}"
         )
     data = r.json()
     audio_b64 = (data.get("audios") or [None])[0]
