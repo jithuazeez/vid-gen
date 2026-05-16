@@ -1,0 +1,66 @@
+# Local-dev compose: brings up redis + api + worker + web.
+# Database: uses RDS (DATABASE_URL from .env).
+# Object storage: uses AWS S3 (AWS_* + S3_BUCKET from .env).
+# `modal serve apps/modal_app/app.py` from a separate terminal mounts the
+# Modal GPU workers — they run on Modal, not here.
+#
+# Usage:
+#   cp .env.example .env
+#   docker compose -f infra/docker-compose.dev.yml up --build
+#   open http://localhost:3000
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/docker/api.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: ../.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["http://localhost:3000"]'
+    ports: ["8000:8000"]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    env_file: ../.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      API_BASE_URL: http://api:8000
+      MODAL_STUB: "0"
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        API_BASE_URL: http://api:8000
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports: ["3000:3000"]
