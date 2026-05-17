@@ -32,10 +32,32 @@ export default function StoryboardPage() {
   // stream so scenes appear the moment the worker publishes them — instead
   // of leaving the user staring at "Planning your scenes…" until they hit
   // refresh manually.
+  //
+  // Two distinct moments matter for the "stream in" feel:
+  //   1. `stage_change` → "thumbnails": the worker has just upserted the
+  //      plan into the DB, so we can paint placeholder tiles immediately
+  //      (otherwise the user stares at the spinner until the FIRST thumb
+  //      finishes, by which time most of the others have too — they all
+  //      render in one burst).
+  //   2. `scene_ready` per scene: patch just that scene's thumbnail asset
+  //      id locally so the tile fills in without re-rendering the whole
+  //      grid and cancelling in-flight asset-url fetches in sibling cards.
   React.useEffect(() => {
     if (!planningJobId) return;
     return subscribeJobEvents(planningJobId, (e) => {
-      if (e.event === "scene_ready" || e.event === "done") {
+      if (e.event === "stage_change" && e.data?.stage === "thumbnails") {
+        void refresh();
+      } else if (e.event === "scene_ready") {
+        const sid = e.data?.scene_id;
+        const aid = e.data?.asset_id;
+        if (sid && aid) {
+          setScenes((arr) => arr.map((s) =>
+            s.id === sid ? { ...s, thumbnail_asset_id: aid } : s
+          ));
+        } else {
+          void refresh();
+        }
+      } else if (e.event === "done") {
         void refresh();
       }
     });
