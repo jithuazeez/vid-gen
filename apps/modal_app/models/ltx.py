@@ -19,6 +19,10 @@ Environment overrides (all optional):
   LTX2_NUM_INFERENCE_STEPS      Default 30.
   LTX2_GUIDANCE_SCALE           Default 3.0.
   LTX2_STG_SCALE                Default 1.0 (spatio-temporal guidance).
+                                Set to 0 to disable STG entirely.
+  LTX2_STG_BLOCKS               Comma-separated transformer block indices for
+                                STG. Default "29" (LTX-2.0); use "28" for
+                                LTX-2.3. Ignored when LTX2_STG_SCALE=0.
   LTX2_CHARREF_STRENGTH         Mid-latent character_ref strength, default 0.5.
   LTX_ALLOW_PLACEHOLDER=1       Offline ffmpeg stub when no refs are present.
 """
@@ -135,6 +139,9 @@ def run_i2v(
     steps = int(os.environ.get("LTX2_NUM_INFERENCE_STEPS", "30"))
     guidance = float(os.environ.get("LTX2_GUIDANCE_SCALE", "3.0"))
     stg = float(os.environ.get("LTX2_STG_SCALE", "1.0"))
+    stg_blocks = [
+        int(x) for x in os.environ.get("LTX2_STG_BLOCKS", "29").split(",") if x.strip()
+    ]
     charref_strength = float(os.environ.get("LTX2_CHARREF_STRENGTH", "0.5"))
 
     def _load(p: str):
@@ -173,12 +180,13 @@ def run_i2v(
         frame_rate=float(fps),
         num_inference_steps=steps,
         guidance_scale=guidance,
-        stg_scale=stg,
-        audio_guidance_scale=None,
         generator=gen,
         output_type="np",
         return_dict=False,
     )
+    if stg > 0 and stg_blocks:
+        call_kwargs["stg_scale"] = stg
+        call_kwargs["spatio_temporal_guidance_blocks"] = stg_blocks
     if negative_prompt:
         call_kwargs["negative_prompt"] = negative_prompt
     call_kwargs = _filter_kwargs(pipe.__call__, call_kwargs)
