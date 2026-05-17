@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import httpx
@@ -87,24 +88,44 @@ def generate_storyboard(self, project_id: str, idempotency_key: str | None = Non
             frontal=frontal,
         )))
 
-    # Await both groups so the storyboard UI gets real thumbs and the
-    # downstream LTX pass has character refs to condition on.
-    for sc, call in thumb_calls:
-        result = call.get()
-        aid = result.get("asset_id") if isinstance(result, dict) else None
-        if aid:
-            _set_scene_thumbnail(str(sc["id"]), aid)
-        publish_event(project_id, "scene_ready",
-                      {"scene_id": str(sc["id"]), "kind": "thumbnail",
-                       "asset_id": aid, "asset_url": signed_url_for_asset(aid)})
+    # Await both groups concurrently so each thumbnail's `scene_ready`
+    # event fires the instant *that* thumb finishes — not in spawn order.
+    # Without the pool, the for-loop blocks on call #1's `.get()`, and any
+    # thumbs that finished earlier sit in a queue: the UI then sees the
+    # whole batch arrive in one burst. Modal call I/O is the bottleneck so
+    # threads are cheap. Same pattern as render_project.py.
+    pool_size = max(4, len(thumb_calls) + len(char_calls))
+    with ThreadPoolExecutor(max_workers=pool_size,
+                            thread_name_prefix="storyboard") as executor:
+        futs: dict = {}
+        for sc, call in thumb_calls:
+            futs[executor.submit(call.get)] = ("thumb", sc)
+        for ch, call in char_calls:
+            futs[executor.submit(call.get)] = ("char", ch)
 
-    for ch, call in char_calls:
-        result = call.get()
-        if isinstance(result, dict) and result.get("asset_id"):
-            _set_character_ref(str(ch["id"]), result["asset_id"])
-        publish_event(project_id, "asset_progress",
-                      {"asset_type": "character_ref", "character_id": str(ch["id"]),
-                       "asset_id": result.get("asset_id") if isinstance(result, dict) else None})
+        for fut in as_completed(futs):
+            kind, obj = futs[fut]
+            try:
+                result = fut.result()
+            except Exception as exc:
+                publish_event(project_id, "warning",
+                              {"stage": kind, "message": str(exc)})
+                continue
+            aid = result.get("asset_id") if isinstance(result, dict) else None
+            if kind == "thumb":
+                if aid:
+                    _set_scene_thumbnail(str(obj["id"]), aid)
+                publish_event(project_id, "scene_ready",
+                              {"scene_id": str(obj["id"]), "kind": "thumbnail",
+                               "asset_id": aid,
+                               "asset_url": signed_url_for_asset(aid)})
+            else:
+                if aid:
+                    _set_character_ref(str(obj["id"]), aid)
+                publish_event(project_id, "asset_progress",
+                              {"asset_type": "character_ref",
+                               "character_id": str(obj["id"]),
+                               "asset_id": aid})
 
     db.update_job(job_id, status="succeeded", current_stage="done")
     publish_event(project_id, "done", {"job_id": job_id, "phase": "storyboard"})
