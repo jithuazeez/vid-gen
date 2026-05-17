@@ -82,6 +82,8 @@ def fetch_asset_by_type(
           AND (%s::uuid IS NULL OR scene_id = %s::uuid)
           AND asset_type = %s
           AND (language = %s::text OR (language IS NULL AND %s::text IS NULL))
+          AND status = 'ready'
+          AND storage_key != ''
         ORDER BY created_at DESC LIMIT 1
         """,
         (project_id, scene_id, scene_id, asset_type, language, language),

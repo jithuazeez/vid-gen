@@ -36,6 +36,13 @@ UNET_CONFIG = os.environ.get("LATENTSYNC_UNET_CONFIG", "configs/unet/stage2.yaml
 INFERENCE_STEPS = int(os.environ.get("LATENTSYNC_INFERENCE_STEPS", "20"))
 GUIDANCE_SCALE = float(os.environ.get("LATENTSYNC_GUIDANCE_SCALE", "1.5"))
 
+# LatentSync's shipped mask.png is a hard-edged binary rectangle, which
+# leaves a visible seam where the synthesized mouth region meets the
+# original frame. Override with a Gaussian-feathered version so the
+# paste-back blends smoothly. Regenerate via scripts/gen_feathered_mask.py
+# if the upstream mask changes.
+_FEATHERED_MASK = Path(__file__).resolve().parent.parent / "assets" / "lipsync_mask_feathered.png"
+
 
 def _ensure_checkpoints() -> None:
     """Download LatentSync weights to the Modal volume on first call.
@@ -154,7 +161,7 @@ def sync(scene_video_path: str, voice_audio_path: str) -> Path:
         weight_dtype=_dtype,
         width=_config.data.resolution,
         height=_config.data.resolution,
-        mask_image_path=_config.data.mask_image_path,
+        mask_image_path=str(_FEATHERED_MASK),
         temp_dir=temp_dir,
     )
     torch.cuda.empty_cache()

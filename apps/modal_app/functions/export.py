@@ -75,6 +75,8 @@ def _list_composites(project_id: str, language: str) -> list[dict[str, Any]]:
                 WHERE a.project_id = %s
                   AND a.asset_type = 'composite'
                   AND a.language = %s
+                  AND a.status = 'ready'
+                  AND a.storage_key != ''
                 ORDER BY s.scene_index ASC
                 """,
                 (project_id, language),

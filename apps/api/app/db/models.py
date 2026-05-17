@@ -172,6 +172,10 @@ class Subtitle(Base):
     language: Mapped[str] = mapped_column(String(8), nullable=False)
     cues: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     generated_position: Mapped[str | None] = mapped_column(String(16))
+    # 'estimated' (split from the Gemini narration script — appears in the
+    # editor the moment the storyboard is approved) or 'whisper' (replaced
+    # in place once the per-scene whisper-align task completes).
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="whisper")
 
     __table_args__ = (UniqueConstraint("scene_id", "language", name="uq_subtitle_scene_lang"),)
 
@@ -198,7 +202,17 @@ class Asset(Base):
     bytes: Mapped[int | None] = mapped_column(BigInteger)
     mime_type: Mapped[str | None] = mapped_column(String(64))
     asset_metadata: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+    # Per-asset state machine — drives the async editor timeline.
+    # queued: slot row, no artifact yet. generating: worker is running.
+    # ready: storage_key + content_hash point at a real artifact. failed:
+    # task raised; UI surfaces a retry. Defaults to 'ready' so legacy rows
+    # written before the editor remain valid without backfill.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ready")
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
     project: Mapped[Project] = relationship(back_populates="assets")
 

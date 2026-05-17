@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.db import get_session
-from app.db.models import RenderJob
+from app.db.models import Asset, RenderJob
 from app.schemas import JobOut
 from app.sse import subscribe_events
 
@@ -58,6 +58,26 @@ async def job_events(
 
     project_id = str(job.project_id)
 
+    # Snapshot current per-asset state so a reconnecting editor can rehydrate
+    # its timeline without waiting for the next worker event. This is the
+    # "reload mid-render" recovery path.
+    asset_res = await session.execute(
+        select(Asset).where(Asset.project_id == job.project_id)
+    )
+    assets_snapshot = [
+        {
+            "id": str(a.id),
+            "scene_id": str(a.scene_id) if a.scene_id else None,
+            "asset_type": a.asset_type,
+            "language": a.language,
+            "status": a.status,
+            "progress": a.progress,
+        }
+        for a in asset_res.scalars().all()
+        if a.asset_type in {"scene_video", "voice", "lipsync_video",
+                            "subtitle_srt", "composite"}
+    ]
+
     async def event_source() -> AsyncIterator[dict[str, str]]:
         # Replay current job state once so a late subscriber sees something.
         yield {
@@ -67,6 +87,7 @@ async def job_events(
                     "status": job.status,
                     "current_stage": job.current_stage,
                     "progress": job.progress,
+                    "assets": assets_snapshot,
                 }
             ),
         }

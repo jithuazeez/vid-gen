@@ -61,6 +61,25 @@ export interface Subtitle {
   language: string;
   cues: SubtitleCue[];
   generated_position: string | null;
+  source?: "estimated" | "whisper";
+}
+
+export type AssetStatus = "queued" | "generating" | "ready" | "failed";
+
+export type AssetType =
+  | "scene_video"
+  | "voice"
+  | "lipsync_video"
+  | "subtitle_srt"
+  | "composite";
+
+export interface AssetState {
+  id: string;
+  scene_id: string | null;
+  asset_type: AssetType;
+  language: string | null;
+  status: AssetStatus;
+  progress: number;
 }
 
 export interface Project {
@@ -77,6 +96,8 @@ export interface Project {
   music_enabled: boolean;
   scenes: Scene[];
   overlays: Overlay[];
+  subtitles?: Subtitle[];
+  assets?: AssetState[];
   latest_job: Job | null;
 }
 

@@ -22,6 +22,12 @@ export const KNOWN_EVENTS = [
   "stage_change",
   "scene_ready",
   "asset_progress",
+  // Per-asset lifecycle — drives the async editor timeline.
+  "asset.started",
+  "asset.ready",
+  "asset.failed",
+  // Whisper finished aligning a scene's audio; replace estimated cues.
+  "subtitle.refined",
   "progress",
   "intent",
   "slot_update",
@@ -29,6 +35,7 @@ export const KNOWN_EVENTS = [
   "ready",
   "thinking",
   "token",
+  "warning",
   "done",
   "error",
 ] as const;

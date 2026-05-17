@@ -43,7 +43,13 @@ secrets.append(modal.Secret.from_dict({"VIDPLATFORM_VERSION": "0.1.0"}))
 
 _cpu_base = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg", "libsndfile1")
+    .apt_install(
+        "ffmpeg", "libsndfile1",
+        # Noto fonts cover Devanagari (hi/mr), Tamil (ta), Gurmukhi (pa), and Latin.
+        # fontconfig + fc-cache lets libass (FFmpeg subtitle renderer) discover them.
+        "fonts-noto-core", "fontconfig",
+    )
+    .run_commands("fc-cache -f -v")
     .pip_install(
         "redis==5.2.0", "boto3==1.35.50",
         "psycopg[binary]==3.2.3", "sqlalchemy==2.0.36",
@@ -128,6 +134,12 @@ musetalk_image = (
         "LATENTSYNC_GUIDANCE_SCALE": "1.5",
     })
     .add_local_python_source("apps")
+    # add_local_python_source only ships .py files; the feathered paste-back
+    # mask is a PNG, so mount it explicitly alongside the package.
+    .add_local_file(
+        "apps/modal_app/assets/lipsync_mask_feathered.png",
+        "/root/apps/modal_app/assets/lipsync_mask_feathered.png",
+    )
 )
 # faster-whisper / ctranslate2 dlopen libcublas.so.12 and libcudnn.so.8 at
 # first GPU call. debian_slim ships neither, so we pull them in as pip

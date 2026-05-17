@@ -230,9 +230,11 @@ def register_asset(
                 """
                 INSERT INTO assets
                   (project_id, scene_id, asset_type, language,
-                   storage_key, content_hash, bytes, mime_type, metadata)
+                   storage_key, content_hash, bytes, mime_type, metadata,
+                   status, progress)
                 VALUES
-                  (:pid, :sid, :at, :lang, :sk, :ch, :b, :mt, CAST(:md AS jsonb))
+                  (:pid, :sid, :at, :lang, :sk, :ch, :b, :mt, CAST(:md AS jsonb),
+                   'ready', 100)
                 RETURNING id
                 """
             ),
@@ -254,3 +256,112 @@ def register_asset(
 def _to_jsonb_str(d: dict[str, Any] | None) -> str:
     import json
     return json.dumps(d or {})
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-asset state machine — feeds the async editor timeline.
+# The API seeds slot rows (status='queued') at job kickoff; the worker
+# flips them to 'generating' on spawn and 'ready' / 'failed' on terminal
+# state. UI subscribes via SSE.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def set_asset_status(
+    *,
+    project_id: str,
+    scene_id: str | None,
+    asset_type: str,
+    language: str | None,
+    status: str,
+    progress: int | None = None,
+) -> None:
+    """Update the slot row matching (project, scene, asset_type, language).
+    No-op when no slot exists — keeps the worker robust against old jobs
+    that predate slot seeding.
+    """
+    sets = ["status = :status", "updated_at = now()"]
+    params: dict[str, Any] = {
+        "pid": project_id, "sid": scene_id,
+        "at": asset_type, "lang": language, "status": status,
+    }
+    if progress is not None:
+        sets.append("progress = :prog")
+        params["prog"] = max(0, min(100, int(progress)))
+    elif status == "ready":
+        sets.append("progress = 100")
+
+    where = ["project_id = :pid", "asset_type = :at"]
+    if scene_id is None:
+        where.append("scene_id IS NULL")
+    else:
+        where.append("scene_id = :sid")
+    if language is None:
+        where.append("language IS NULL")
+    else:
+        where.append("language = :lang")
+
+    with session_scope() as s:
+        s.execute(
+            text(
+                f"UPDATE assets SET {', '.join(sets)} "
+                f"WHERE {' AND '.join(where)}"
+            ),
+            params,
+        )
+
+
+def seed_estimated_subtitle_cues(project_id: str, language: str) -> None:
+    """Split each scene's narration_script into rough cues and persist as
+    Subtitle rows with source='estimated'. These appear in the editor the
+    moment the storyboard is approved; whisper_align overwrites with
+    word-accurate timings as each scene's audio finishes.
+    """
+    import json
+    import re
+
+    with session_scope() as s:
+        rows = s.execute(
+            text(
+                """
+                SELECT id, duration_seconds, narration_script, has_speaker
+                FROM scenes WHERE project_id = :pid ORDER BY scene_index
+                """
+            ),
+            {"pid": project_id},
+        ).mappings().all()
+
+        for r in rows:
+            if not r["has_speaker"]:
+                continue
+            script = (r["narration_script"] or "").strip()
+            if not script:
+                continue
+            chunks = [
+                p.strip()
+                for p in re.split(r"(?<=[.!?])\s+|\n+|,\s+", script)
+                if p.strip()
+            ]
+            if not chunks:
+                continue
+            dur = float(r["duration_seconds"] or 0) or len(chunks) * 1.5
+            per = dur / len(chunks)
+            cues = [
+                {"start": round(i * per, 2),
+                 "end":   round((i + 1) * per, 2),
+                 "text":  c}
+                for i, c in enumerate(chunks)
+            ]
+            # Don't clobber a whisper-aligned row if one already exists for
+            # this scene+language — the worker may re-run after editing.
+            s.execute(
+                text(
+                    """
+                    INSERT INTO subtitles (scene_id, language, cues, source)
+                    VALUES (:sid, :lang, CAST(:cues AS jsonb), 'estimated')
+                    ON CONFLICT (scene_id, language) DO UPDATE
+                      SET cues = EXCLUDED.cues, source = 'estimated'
+                      WHERE subtitles.source <> 'whisper'
+                    """
+                ),
+                {"sid": r["id"], "lang": language, "cues": json.dumps(cues)},
+            )

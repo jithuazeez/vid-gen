@@ -154,8 +154,9 @@ def register_asset(
                     """
                     INSERT INTO assets
                       (project_id, scene_id, asset_type, language,
-                       storage_key, content_hash, bytes, mime_type, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                       storage_key, content_hash, bytes, mime_type, metadata,
+                       status, progress)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 'ready', 100)
                     RETURNING id
                     """,
                     (

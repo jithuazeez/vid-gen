@@ -71,6 +71,19 @@ class SubtitleOut(BaseModel):
     language: str
     cues: list[SubtitleCue]
     generated_position: str | None
+    source: str = "whisper"
+
+
+class AssetState(BaseModel):
+    """Per-asset row exposed for the async editor timeline."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    scene_id: uuid.UUID | None
+    asset_type: str
+    language: str | None
+    status: str  # queued | generating | ready | failed
+    progress: int
 
 
 class JobOut(BaseModel):
@@ -106,4 +119,6 @@ class ProjectOut(BaseModel):
     updated_at: datetime
     scenes: list[SceneOut] = Field(default_factory=list)
     overlays: list[OverlayOut] = Field(default_factory=list)
+    subtitles: list[SubtitleOut] = Field(default_factory=list)
+    assets: list[AssetState] = Field(default_factory=list)
     latest_job: JobOut | None = None

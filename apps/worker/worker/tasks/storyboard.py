@@ -46,6 +46,15 @@ def generate_storyboard(self, project_id: str, idempotency_key: str | None = Non
 
     plan = _plan(project)
     db.upsert_scenes(project_id, plan.get("scenes", []))
+    # Surface placeholder subtitle cues on the editor timeline as soon as
+    # the plan exists — whisper_align overwrites these per-scene with
+    # word-accurate timings once each scene's audio is ready.
+    sb_lang = project.get("primary_language") or "en"
+    try:
+        db.seed_estimated_subtitle_cues(project_id, sb_lang)
+    except Exception as exc:
+        publish_event(project_id, "warning",
+                      {"stage": "estimated_cues", "message": str(exc)})
     characters = _upsert_characters(project_id, plan.get("characters", []))
 
     publish_event(project_id, "stage_change",

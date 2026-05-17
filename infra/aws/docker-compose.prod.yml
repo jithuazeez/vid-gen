@@ -1,0 +1,81 @@
+# Production compose for AWS EC2 (Ubuntu 22.04).
+# Runs postgres + redis + api + worker + nginx on a single host.
+# Object storage is AWS S3 (AWS_* credentials in .env).
+#
+# Usage on the EC2 instance (after infra/aws/bootstrap.sh):
+#   docker compose -f infra/aws/docker-compose.prod.yml up -d --build
+#
+# Run from the laptop via:
+#   bash infra/aws/deploy.sh
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vidplatform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-vidplatform}
+    volumes:
+      - /srv/vidplatform/data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vidplatform} -d ${POSTGRES_DB:-vidplatform}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - /srv/vidplatform/data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: /srv/vidplatform/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vidplatform}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vidplatform}
+      REDIS_URL: redis://redis:6379/0
+    expose: ["8000"]
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/docker/worker.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    env_file: /srv/vidplatform/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-vidplatform}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vidplatform}
+      REDIS_URL: redis://redis:6379/0
+      API_BASE_URL: http://api:8000
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on: [api]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro

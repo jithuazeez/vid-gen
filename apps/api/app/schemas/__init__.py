@@ -9,6 +9,7 @@ from app.schemas.brief import (
 )
 from app.schemas.events import SSEEvent
 from app.schemas.project import (
+    AssetState,
     JobOut,
     ProjectCreate,
     ProjectOut,
@@ -22,6 +23,7 @@ from app.schemas.timeline import CharacterPlan, ScenePlan, Timeline
 
 __all__ = [
     "AspectRatio",
+    "AssetState",
     "Brief",
     "CharacterPlan",
     "JobOut",

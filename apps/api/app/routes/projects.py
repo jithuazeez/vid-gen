@@ -13,8 +13,15 @@ from sqlalchemy.orm import selectinload
 
 from app.celery_client import send as send_celery
 from app.db import get_session
-from app.db.models import Project, RenderJob
-from app.schemas import JobOut, ProjectCreate, ProjectOut, ProjectPatch
+from app.db.models import Asset, Project, RenderJob, Scene, Subtitle
+from app.schemas import (
+    AssetState,
+    JobOut,
+    ProjectCreate,
+    ProjectOut,
+    ProjectPatch,
+    SubtitleOut,
+)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -35,7 +42,7 @@ async def create_project(
     session.add(project)
     await session.commit()
     project = await _load_project(session, project.id)
-    return _to_out(project, latest_job=None)
+    return _to_out(project, latest_job=None, subtitles=[])
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -45,7 +52,8 @@ async def get_project(
 ) -> ProjectOut:
     project = await _load_project(session, project_id)
     latest_job = await _latest_job(session, project_id)
-    return _to_out(project, latest_job)
+    subs = await _project_subtitles(session, project_id)
+    return _to_out(project, latest_job, subs)
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
@@ -80,20 +88,37 @@ async def patch_project(
 
     await session.commit()
     await session.refresh(project)
+    project = await _load_project(session, project_id)
     latest_job = await _latest_job(session, project_id)
-    return _to_out(project, latest_job)
+    subs = await _project_subtitles(session, project_id)
+    return _to_out(project, latest_job, subs)
 
 
 async def _load_project(session: AsyncSession, project_id: uuid.UUID) -> Project:
     result = await session.execute(
         select(Project)
-        .options(selectinload(Project.scenes), selectinload(Project.overlays))
+        .options(
+            selectinload(Project.scenes),
+            selectinload(Project.overlays),
+            selectinload(Project.assets),
+        )
         .where(Project.id == project_id)
     )
     project = result.scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
     return project
+
+
+async def _project_subtitles(
+    session: AsyncSession, project_id: uuid.UUID
+) -> list[Subtitle]:
+    res = await session.execute(
+        select(Subtitle)
+        .join(Scene, Subtitle.scene_id == Scene.id)
+        .where(Scene.project_id == project_id)
+    )
+    return list(res.scalars().all())
 
 
 async def _latest_job(session: AsyncSession, project_id: uuid.UUID) -> RenderJob | None:
@@ -106,12 +131,27 @@ async def _latest_job(session: AsyncSession, project_id: uuid.UUID) -> RenderJob
     return result.scalar_one_or_none()
 
 
-def _to_out(project: Project, latest_job: RenderJob | None) -> ProjectOut:
+def _to_out(
+    project: Project,
+    latest_job: RenderJob | None,
+    subtitles: list[Subtitle] | None = None,
+) -> ProjectOut:
+    # Filter assets down to "interesting" ones — the editor needs scene-scoped
+    # rows (one per (scene, asset_type) slot). Thumbnails and character refs
+    # are stored as scene-less or always-ready and the timeline doesn't
+    # render them.
+    timeline_assets = [
+        a for a in (project.assets or [])
+        if a.asset_type in {"scene_video", "voice", "lipsync_video",
+                            "subtitle_srt", "composite"}
+    ]
     return ProjectOut.model_validate(
         {
             **{k: getattr(project, k) for k in ProjectOut.model_fields if hasattr(project, k)},
             "scenes": list(project.scenes),
             "overlays": list(project.overlays),
+            "subtitles": [SubtitleOut.model_validate(s) for s in (subtitles or [])],
+            "assets": [AssetState.model_validate(a) for a in timeline_assets],
             "latest_job": JobOut.model_validate(latest_job) if latest_job else None,
         }
     )

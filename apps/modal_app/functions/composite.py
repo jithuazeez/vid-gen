@@ -118,7 +118,7 @@ def _run_ffmpeg(
         escaped = srt_in.replace("'", "'\\''")
         filters.append(
             f"[0:v]subtitles='{escaped}':force_style='FontSize=18,Outline=2,"
-            f"OutlineColour=&H40000000,BorderStyle=3'[vout]"
+            f"OutlineColour=&H40000000,BorderStyle=3,FontName=Noto Sans'[vout]"
         )
     else:
         filters.append("[0:v]copy[vout]")

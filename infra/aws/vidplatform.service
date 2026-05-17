@@ -1,0 +1,16 @@
+[Unit]
+Description=vidplatform — API + Celery worker + Postgres + Redis + nginx (Docker Compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/vidplatform
+ExecStart=/usr/bin/docker compose -f infra/aws/docker-compose.prod.yml up -d
+ExecStop=/usr/bin/docker compose -f infra/aws/docker-compose.prod.yml down
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

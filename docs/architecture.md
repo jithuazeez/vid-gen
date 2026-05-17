@@ -4,7 +4,7 @@
 
 ## 1. Overview
 
-A platform that generates cinematic multilingual videos from a chat-driven brief. The user describes what they want, the system collects a structured spec conversationally, plans scenes, generates visuals + narration + (gated) lip-sync + subtitles + overlays, and produces export-ready MP4s. Audio per scene is gated on `has_speaker`: speaker scenes get TTS narration + MuseTalk lip-sync, non-speaker scenes use LTX-2's native audio output. Language can be switched without regenerating visual scenes.
+A platform that generates cinematic multilingual videos from a chat-driven brief. The user describes what they want, the system collects a structured spec conversationally, plans scenes, generates visuals + narration + (gated) lip-sync + subtitles + overlays, and produces export-ready MP4s. Audio per scene is gated on `has_speaker`: speaker scenes get TTS narration + LatentSync lip-sync; non-speaker scenes ship silent under the current LTX-Video 0.9.x backend (a `native_audio` track re-enables when LTX-2 becomes loadable through diffusers — see §11). Language can be switched without regenerating visual scenes.
 
 **Target languages:** English, Hindi, Marathi, Tamil, Punjabi.
 
@@ -26,7 +26,7 @@ A platform that generates cinematic multilingual videos from a chat-driven brief
 - Translation via Sarvam Translate
 - Face-aware subtitle positioning (MediaPipe)
 - Animated text overlays as a first-class timeline track
-- Per-scene audio: speaker scenes use Sarvam TTS + MuseTalk lip-sync; non-speaker scenes use LTX-2's native audio output (no separate background music generation)
+- Per-scene audio: speaker scenes use Sarvam TTS + LatentSync lip-sync; non-speaker scenes are silent under LTX-Video 0.9.x (no separate background music generation; `native_audio` re-enables when LTX-2 lands)
 - Export to MP4 at 720p or 1080p, with burned-in or sidecar SRT
 - Per-scene regeneration
 - Render state tracking with SSE progress updates
@@ -56,7 +56,7 @@ Three services + shared infra. API is stateless and CPU-light. **Celery worker**
 └───────────────────────┬─────────────────────────────────┘
                         │ REST + SSE
 ┌───────────────────────▼─────────────────────────────────┐
-│               API Service  (FastAPI on Fly.io)          │
+│        API Service  (FastAPI on OCI Ampere A1)          │
 │   /projects /chat /storyboard /scenes /jobs /assets     │
 │         /regenerate-language /export /overlays          │
 └───┬──────────────┬─────────────────┬───────────────┬────┘
@@ -132,10 +132,10 @@ This split lets us debug controller logic without re-deploying Modal, and re-tun
 | DB | Postgres 16 on the OCI Ampere A1 VM, or OCI Autonomous DB (Always-Free, 20 GB) | Single source of truth |
 | Object store | AWS S3 free tier *or* OCI Object Storage with the S3-compatibility API (Always-Free 20 GB) | Code against `boto3`; S3-compat means a single client works for both |
 | Translation + TTS | Sarvam Translate + Bulbul-v2 (cloud API) | SOTA for 5 Indian langs |
-| Video gen | LTX-2 19B via `diffusers.LTX2ConditionPipeline` (Stage-1) | A100-40GB with sequential CPU offload; dual-image conditioning (thumbnail at index 0 anchors composition, character_ref at mid-latent index hints identity) |
-| Native scene audio | LTX-2 audio output | Persisted as `native_audio` for non-speaker scenes; speaker scenes use TTS + lip-sync instead |
-| Image gen | SDXL-Turbo | Char refs + storyboard thumbnails |
-| Lip-sync | MuseTalk | Modern, better than Wav2Lip |
+| Video gen | `Lightricks/LTX-Video` v0.9.7 distilled FP8 (13B) via `diffusers.LTXImageToVideoPipeline`, bfloat16 | A100-40GB; conditioning image is the per-scene thumbnail (or, in explainer mode, always the project-wide character_ref — see §11.5). LTX-2.3 upgrade blocked on diffusers support. |
+| Native scene audio | _Not available under LTX 0.9.x_ | Non-speaker scenes are silent today; the `native_audio` asset type is reserved for when LTX-2 lands |
+| Image gen | SDXL-Turbo | Char refs + storyboard thumbnails (frontal-studio variant in explainer mode) |
+| Lip-sync | LatentSync | Modern, better than Wav2Lip. Modal function and image are still named `musetalk_*` for historical reasons |
 | Subtitle alignment | Whisper large-v3 | Word-level forced alignment |
 | Face detection | MediaPipe Face Detector | CPU, light |
 | Compositing | FFmpeg (system binary inside Modal CPU function) | Standard |
@@ -149,7 +149,7 @@ The key cost optimisation: each Modal function uses the smallest GPU that holds 
 
 | Function | GPU | Approx VRAM | Modal $/hr (preemptible base) | Notes |
 |---|---|---|---|---|
-| `ltx_render` | A100 40GB | ~40 GB | $2.10 | LTX-2 19B I2V with sequential offload, ~30–90 s per clip |
+| `ltx_render` | A100 40GB | ~14 GB | $2.10 | LTX-Video 0.9.7 distilled FP8 (13B) I2V, bfloat16, ~30–90 s per clip |
 | `sdxl_image` | A10G | ~7 GB | $1.10 | Char refs + thumbnails, ~1–2 s per image |
 | `musetalk_sync` | A10G | ~4 GB | $1.10 | Gated; only runs when scene.has_speaker |
 | `whisper_align` | T4 | ~3 GB | $0.59 | Forced alignment for subtitles (speaker scenes only) |
@@ -190,7 +190,7 @@ video-platform/
 │   │   ├── celery_app.py             # broker=Redis, result_backend=Redis
 │   │   ├── tasks/
 │   │   │   ├── render_project.py     # Phase B controller; fan out per-scene work via Modal
-│   │   │   ├── regen_language.py     # Cheap language switch (reuses cached visuals + native_audio)
+│   │   │   ├── regen_language.py     # Cheap language switch (reuses cached visuals)
 │   │   │   ├── regen_scene.py        # Per-scene regen (script / prompt / has_speaker change)
 │   │   │   ├── storyboard.py         # Phase A: scene plan + thumbnails fan-out
 │   │   │   └── export.py             # Final encode with target quality/subtitles
@@ -203,13 +203,13 @@ video-platform/
 │   │   ├── functions/
 │   │   │   ├── thumbnails.py         # sdxl_image — thumbnails
 │   │   │   ├── character_refs.py     # sdxl_image — char refs
-│   │   │   ├── scene_video.py        # ltx_render — LTX-2 I2V (+ native_audio for non-speaker scenes)
+│   │   │   ├── scene_video.py        # ltx_render — LTX-Video I2V (silent MP4; explainer-mode prompt branch)
 │   │   │   ├── voice.py              # Sarvam Bulbul (CPU; thin API wrapper)
 │   │   │   ├── lipsync.py            # musetalk_sync (gated)
 │   │   │   ├── subtitles.py          # whisper_align + mediapipe_face
 │   │   │   ├── composite.py          # ffmpeg_composite per scene
 │   │   │   └── export.py             # ffmpeg final mux
-│   │   ├── models/                   # Model loaders (LTX-2, SDXL, MuseTalk, Whisper)
+│   │   ├── models/                   # Model loaders (LTX-Video 0.9.7, SDXL-Turbo, LatentSync, Whisper)
 │   │   ├── providers/                # External API adapters
 │   │   │   ├── sarvam.py
 │   │   │   └── llm.py                # Gemini wrapper for inside-Modal calls
@@ -362,6 +362,8 @@ CREATE TABLE assets (
   asset_type TEXT NOT NULL,
     -- thumbnail | character_ref | scene_video | voice | lipsync_video
     -- | subtitle_srt | native_audio | composite | final_export
+    -- native_audio is reserved/unused while LTX-Video 0.9.x is the backend
+    -- (no native audio output); re-enables when LTX-2 lands.
   language TEXT,                           -- null = language-agnostic
   storage_key TEXT NOT NULL,
   content_hash TEXT NOT NULL,              -- sha256 of inputs (idempotency)
@@ -514,7 +516,7 @@ GET    /assets/:id                                                200 { signed_u
 │ render_scene_  │                                       │ per scene (only if │
 │ video          │                                       │ has_speaker):      │
 │ (ltx_render)   │ × N                                   │ voice → lipsync →  │
-│ + native_audio │ for non-speaker scenes                │ subtitles          │
+│  silent MP4    │  non-speaker scenes carry silence     │ subtitles          │
 └───────┬────────┘                                       └─────────┬──────────┘
         │                                                          │
         └───────────────────────────┬──────────────────────────────┘
@@ -558,7 +560,7 @@ For language L (where L != already-rendered):
                      │
                      ▼
       ┌──────────────────────────────┐
-      │ composite_scene(S, L)        │   reuses scene_video + native_audio
+      │ composite_scene(S, L)        │   reuses scene_video (silent for non-speaker)
       └──────────────┬───────────────┘
                      │
                      ▼
@@ -571,8 +573,7 @@ For language L (where L != already-rendered):
 
 What's NOT regenerated on language switch:
 
-- `scene_video` (LTX-2 output) — reused
-- `native_audio` (LTX-2 audio for non-speaker scenes) — reused (language-agnostic)
+- `scene_video` (LTX-Video output) — reused
 - `character_ref` images — reused
 - `thumbnails` — reused
 - MediaPipe face-detection data — cached on the scene, reused
@@ -656,8 +657,8 @@ from app.modal_client import ltx_render, generate_voice, \
 @shared_task(bind=True, autoretry_for=(TransientError,), max_retries=3,
              retry_backoff=True, retry_jitter=True)
 def render_project(self, project_id: str, language: str) -> str:
-    """Phase B controller. Runs in the Celery worker on Fly.io; calls Modal
-    functions via .spawn() (async submit) and .get() (await). One row in
+    """Phase B controller. Runs in the Celery worker on the OCI Ampere A1 VM;
+    calls Modal functions via .spawn() (async submit) and .get() (await). One row in
     `render_jobs` tracks status; SSE events flow through Redis pub/sub.
     """
     job = db_create_job(project_id, "initial_render", language,
@@ -665,8 +666,8 @@ def render_project(self, project_id: str, language: str) -> str:
     project = db_fetch_project(project_id)
     scenes = db_list_scenes(project_id)
 
-    # 1. Fan out visuals (LTX-2 renders silent video + native_audio for
-    #    non-speaker scenes). Each .spawn() returns a Modal FunctionCall;
+    # 1. Fan out visuals (LTX-Video renders silent MP4; non-speaker scenes
+    #    stay silent under 0.9.x). Each .spawn() returns a Modal FunctionCall;
     #    we record the call IDs on `render_jobs.modal_call_ids` so a
     #    cancellation request can reach Modal.
     visual_calls = [
@@ -681,8 +682,8 @@ def render_project(self, project_id: str, language: str) -> str:
         publish_sse(project_id, "scene_ready", {"scene_id": c.scene_id})
 
     # 3. Per-scene language pipeline. Voice/lipsync/subs only run for
-    #    speaker scenes; non-speaker scenes use LTX-2's native_audio
-    #    and go straight to composite.
+    #    speaker scenes; non-speaker scenes stay silent and go straight
+    #    to composite.
     publish_sse(project_id, "stage_change", {"stage": "voice"})
     composite_calls = []
     for s in scenes:
@@ -710,7 +711,7 @@ def render_project(self, project_id: str, language: str) -> str:
 # apps/worker/tasks/regen_language.py
 @shared_task(bind=True, autoretry_for=(TransientError,), max_retries=3)
 def regen_language(self, project_id: str, language: str) -> str | None:
-    """Cheap language switch. Reuses all visuals + native_audio."""
+    """Cheap language switch. Reuses all visuals."""
     project = db_fetch_project(project_id)
     if language in project.available_languages:
         # Already rendered. Just flip active_language and return — no Modal calls.
@@ -721,9 +722,9 @@ def regen_language(self, project_id: str, language: str) -> str | None:
                         idempotency_key=self.request.id)
     scenes = db_list_scenes(project_id)
 
-    # Same per-scene pipeline as render_project, but visuals + native_audio
-    # are skipped because their content_hash is language-agnostic and
-    # already cached. Voice/lipsync/subs still gate on has_speaker.
+    # Same per-scene pipeline as render_project, but visuals are skipped
+    # because their content_hash is language-agnostic and already cached.
+    # Voice/lipsync/subs still gate on has_speaker.
     composite_calls = []
     for s in scenes:
         if s.has_speaker:
@@ -755,7 +756,7 @@ Two layers, complementary:
 
 Two levels:
 
-1. **Project-level** (`projects.has_characters`) — set during the chat in Screen 1 by an explicit question. If false, every scene defaults `has_speaker=false`, and MuseTalk is skipped throughout.
+1. **Project-level** (`projects.has_characters`) — set during the chat in Screen 1 by an explicit question. If false, every scene defaults `has_speaker=false`, and LatentSync is skipped throughout.
 
 2. **Scene-level** (`scenes.has_speaker`) — defaults from `projects.has_characters`. Scene Engine auto-sets per scene by analysing the narration script (looks for quoted speech, dialogue verbs, character mentions). User can override via toggle on storyboard.
 
@@ -808,10 +809,10 @@ What's regenerated per scene:
 - `generate_voice` (Sarvam Bulbul-v2 in the target language; uses Sarvam Translate first if script is in primary_language)
 - `apply_lip_sync` (only if `scene.has_speaker`)
 - `generate_subtitles` (Whisper alignment on the new voice; reuses cached MediaPipe face data)
-- `composite_scene` (reuses cached `scene_video` and, for non-speaker scenes, `native_audio`)
+- `composite_scene` (reuses cached `scene_video`; non-speaker scenes stay silent)
 - `final_export` for the new language
 
-What's reused: `scene_video`, `native_audio`, `character_ref`, `thumbnail`, MediaPipe face data.
+What's reused: `scene_video`, `character_ref`, `thumbnail`, MediaPipe face data.
 
 ---
 
@@ -819,14 +820,30 @@ What's reused: `scene_video`, `native_audio`, `character_ref`, `thumbnail`, Medi
 
 Audio per scene is gated on `scenes.has_speaker`:
 
-- **Speaker scenes** (`has_speaker = true`) → Sarvam Bulbul-v2 TTS + MuseTalk lip-sync. The narration WAV is muxed into the lip-sync MP4 by MuseTalk; composite passes that through. Whisper-aligned subtitles burn in on top.
-- **Non-speaker scenes** (`has_speaker = false`) → LTX-2's native audio output is captured during the `scene_video` step and registered as a `native_audio` asset alongside the silent MP4. Composite mixes it onto the video. No TTS, no lip-sync, no subtitles for these scenes.
+- **Speaker scenes** (`has_speaker = true`) → Sarvam Bulbul-v2 TTS + LatentSync lip-sync (Modal function still named `musetalk_sync`). The narration WAV is muxed into the lip-sync MP4; composite passes it through. Whisper-aligned subtitles burn in on top.
+- **Non-speaker scenes** (`has_speaker = false`) → **silent** under the current LTX-Video 0.9.x backend. `apps/modal_app/models/ltx.py` produces a silent MP4 (no audio track), and `composite_scene` passes that through without an audio mix. The `native_audio` asset type is reserved for when LTX-2 (which emits native audio) becomes loadable through diffusers.
 
-Background music generation was removed in the LTX-2 migration — non-speaker scenes carry whatever LTX-2 produces (ambient room tone, footsteps, score-like cues), and there's no separate score track to duck under voice.
+Background music generation was deliberately cut from the MVP. Until LTX-2 lands, non-speaker scenes have no audio; speaker scenes carry narration only.
 
 ### Cache and language-switch behaviour
 
-`native_audio` is language-agnostic and stays cached across language switches alongside `scene_video`. Only voice/lipsync/subtitles re-render per language, and only for speaker scenes.
+Only voice/lipsync/subtitles re-render per language, and only for speaker scenes. `scene_video` is language-agnostic and cached.
+
+---
+
+## 11.5 Explainer mode
+
+`video_type == "explainer"` (collected in chat, stored on `projects.brief`) triggers a divergent pipeline tuned for talking-head/educational footage. Implemented in commit `3394a13`.
+
+What changes vs the default cinematic path:
+
+- **Character reference (SDXL)** — `apps/worker/tasks/storyboard.py` sets `frontal=True` when fanning out char-ref generation. `apps/modal_app/functions/character_refs.py` then renders a sharp studio portrait with direct eye contact and no shallow depth of field, instead of the cinematic 3/4 view used otherwise.
+- **LTX prompt builder** — `apps/modal_app/functions/scene_video.py` branches on `brief.video_type == "explainer"` and calls `_build_explainer_prompt()` (locked-off bust framing, frontal face, no camera move) rather than the motion-first cinematic prompt.
+- **Negative prompt** — `NEGATIVE_PROMPT_EXPLAINER` rejects profile / 3-4 views, pans, dollies, and wide shots, keeping the subject centered and static.
+- **Conditioning image** — always uses the project-wide `character_ref` as the LTX conditioning image. The default path uses the per-scene thumbnail and only falls back to `character_ref` if the thumbnail is missing.
+- **Guidance scale** — raised to 4.5 (vs 3.0 default) for tighter prompt adherence on the locked-off framing.
+
+No schema changes — the entire mode is driven by `brief.video_type`. Lip-sync gating still flows through `has_speaker`; an explainer scene with `has_speaker=false` is rare but supported (silent locked-off shot).
 
 ---
 
@@ -1005,7 +1022,7 @@ cd apps/web && vercel deploy --prod
 
 ## 17. Open implementation questions
 
-1. **LTX-2 pin.** `diffusers.LTX2ConditionPipeline` currently lives on `diffusers` main; pin by commit SHA via `LTX2_DIFFUSERS_REF`. Re-pin after each upstream change we adopt.
+1. **LTX version pin.** Currently `Lightricks/LTX-Video` v0.9.7 distilled FP8 via `diffusers.LTXImageToVideoPipeline` (bfloat16). The LTX-2.3 upgrade is blocked on diffusers support — `apps/modal_app/models/ltx.py` notes LTX-2.3 isn't yet loadable through diffusers. Revisit when upstream lands.
 2. **Scene continuity.** Default to dual-image conditioning (per-scene thumbnail at index 0, project-wide character_ref at mid-latent index). If identity drift remains an issue across >3 consecutive scenes, increase `LTX2_CHARREF_STRENGTH` from 0.5 toward 0.7.
 3. **Speech detection in Scene Engine.** Heuristics first (quoted speech, dialogue verbs). Upgrade to Gemini returning `has_speaker: bool` per scene as part of structured output.
 4. **Sarvam rate limits.** Confirm Bulbul-v2 concurrency; batch TTS calls if low.
@@ -1013,7 +1030,7 @@ cd apps/web && vercel deploy --prod
 6. **Subtitle position auto-decision.** MediaPipe runs on N=5 sampled frames per scene. If face bbox vertical centre is in bottom 33% of frame for ≥3 of 5 frames, choose `top`; else `bottom`.
 7. **Modal cold starts.** A100 cold start is ~30–60 s. For the demo, `modal warm vidplatform` before the interview to pre-spin containers.
 8. **Edit-mode intent confidence threshold.** Empirically tune the < 0.6 cutoff after dogfooding. Too aggressive → annoying clarifications; too loose → wrong action taken.
-9. **Celery worker concurrency.** Start at `--concurrency=4` on the Fly.io shared-cpu-1x. Scene fan-out runs on Modal so Celery is mostly I/O-bound (waiting on `.get()`); 4 in-flight projects fits.
+9. **Celery worker concurrency.** Start at `--concurrency=4` on the OCI Ampere A1 VM (4 OCPU). Scene fan-out runs on Modal so Celery is mostly I/O-bound (waiting on `.get()`); 4 in-flight projects fits.
 
 ---
 
@@ -1027,10 +1044,10 @@ Build vertically, not horizontally. Get one scene rendering end-to-end before ad
 | 2 | Storyboard path: chat collects brief → Gemini scene plan → SDXL thumbnails (Phase A) | Storyboard renders with 3+ thumbnails from a single chat |
 | 3 | Single-scene full render (English): LTX I2V → Sarvam TTS → Whisper subs → FFmpeg composite | Watch a 6-second video with narration + subs |
 | 4 | Multi-scene + final export, driven by `render_project` Celery task fanning out via Modal `.spawn()` | 30-second multi-scene video plays end-to-end |
-| 5 | Lip-sync (gated): MuseTalk integration + Screen 2 speaker toggle | Toggle a scene; lipsync runs only when on |
+| 5 | Lip-sync (gated): LatentSync integration + Screen 2 speaker toggle | Toggle a scene; lipsync runs only when on |
 | 6 | Language switch: `/regenerate-language` Celery task + dropdown + content-hash cache + edit-mode chat for "switch to Hindi" intent | Switch to Hindi via dropdown AND via chat; second switch instant |
 | 7 | Overlays + subtitle editor + edit-mode chat for scene/overlay edits in Screens 2 + 4 | All 5 screens working; chat can edit a scene script and trigger regen |
-| 8 | Polish: README, ARCHITECTURE.md cross-links, Modal warm script, Loom recording, deploy on Fly + Modal | Live URL for reviewer + recorded demo |
+| 8 | Polish: README, ARCHITECTURE.md cross-links, Modal warm script, Loom recording, deploy on OCI + Modal | Live URL for reviewer + recorded demo |
 
 Cut features aggressively if it slips — the architecture supports them, the submission doesn't have to include them. Recommended cut order if needed: (i) edit-mode chat in Screen 4 (keep in Screen 2), (ii) overlays editor (keep schema, ship one CTA from Timeline), (iii) lip-sync (gating already lets us skip cleanly), (iv) language switch beyond one alt language. Never cut: chat → storyboard → single-scene render → export.
 
@@ -1150,7 +1167,7 @@ Estimated GPU-seconds per *initial* render of a 30-second, 5-scene video, Englis
 |---|---|---|---|---|---|---|
 | Thumbnails | sdxl_image | A10G | 2 s | 5 | 10 | $0.003 |
 | Char refs | sdxl_image | A10G | 2 s | 2 | 4 | $0.001 |
-| Scene videos | ltx_render | A100 40GB | 60 s | 5 | 300 | $0.175 |
+| Scene videos | ltx_render | A100 40GB | 60 s | 5 | 300 | $0.175 (LTX-Video 0.9.7 distilled FP8, 13B) |
 | Voice (speaker scenes only) | sarvam (cloud) | — | — | ~2 | — | ~$0.02 (Sarvam) |
 | Subtitles (speaker scenes only) | whisper_align | T4 | 3 s | ~2 | 6 | $0.001 |
 | Lip-sync (gated) | musetalk_sync | A10G | 8 s | ~2 | 16 | $0.005 |
@@ -1158,14 +1175,14 @@ Estimated GPU-seconds per *initial* render of a 30-second, 5-scene video, Englis
 | Final export | ffmpeg_composite | CPU | 6 s | 1 | 6 | $0.000 |
 | **Total per render** | | | | | | **~$0.21** |
 
-Plus container cold-start time (~30–60s on A100, ~10s on smaller GPUs) and the 1.25× US-region multiplier → ~$0.25–0.30 per full demo. The LTX-2 line item dominates now that the model is 19B with sequential CPU offload.
+Plus container cold-start time (~30–60s on A100, ~10s on smaller GPUs) and the 1.25× US-region multiplier → ~$0.25–0.30 per full demo. The `ltx_render` line item dominates.
 
-Each language switch is ~5–10% of the above (only voice + lipsync + subs + composite + final export for speaker scenes, since visuals + native_audio are content-hash cache hits) → ~$0.01–0.02 per added language.
+Each language switch is ~5–10% of the above (only voice + lipsync + subs + composite + final export for speaker scenes, since `scene_video` is a content-hash cache hit) → ~$0.01–0.02 per added language.
 
 ### Cost-saving rules of thumb
 
 - `min_containers=0` for everything during development
-- For the live demo, set `min_containers=1` only on `ltx_render` and `sdxl_image` 30 minutes before the interview (LTX-2 cold start downloads ~40 GB of weights into the volume the first time)
+- For the live demo, set `min_containers=1` only on `ltx_render` and `sdxl_image` 30 minutes before the interview (LTX-Video 0.9.7 distilled FP8 cold start downloads ~13 GB of weights into the volume the first time)
 - Use the Modal dashboard to confirm idle containers shut down after a run
 - Don't render the full 30-second video on every test — test individual stages in isolation first
 

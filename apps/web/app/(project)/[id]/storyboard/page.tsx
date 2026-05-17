@@ -45,9 +45,9 @@ export default function StoryboardPage() {
     setGenerating(true);
     try {
       const { job_id } = await api.generate(id);
-      const unsub = subscribeJobEvents(job_id, () => { /* no-op */ });
-      setTimeout(() => unsub(), 500);
-      router.push(`/${id}/progress?job=${job_id}`);
+      // The async editor is the new landing — assets stream in as they're
+      // rendered; the user can edit any tile in place.
+      router.push(`/${id}/editor?job=${job_id}`);
     } catch (e) {
       console.error(e);
       setGenerating(false);
