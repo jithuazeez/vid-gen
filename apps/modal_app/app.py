@@ -69,10 +69,13 @@ LTX2_DIFFUSERS_REF = os.environ.get(
 ltx_image = (
     _cpu_base.pip_install(
         "torch==2.5.1", "torchaudio==2.5.1",
-        "transformers==4.46.3", "tokenizers>=0.20",
-        "imageio[ffmpeg]==2.36.0", "accelerate==1.1.1",
+        # LTX-2 uses Gemma3 as its text encoder — added to transformers in
+        # 4.50.0. The pipeline lives on diffusers main, so we pair it with
+        # a recent transformers release that includes Gemma3.
+        "transformers==4.50.0", "tokenizers>=0.21",
+        "imageio[ffmpeg]==2.36.0", "accelerate>=1.4.0",
         "sentencepiece==0.2.0", "soundfile>=0.12",
-        "peft>=0.13",
+        "peft>=0.14",
     )
     .pip_install(LTX2_DIFFUSERS_REF)
     .env({
