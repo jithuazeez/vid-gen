@@ -53,6 +53,12 @@ On every turn, emit JSON exactly matching this schema:
   "clarification": ""                             // when unclear=true, a one-line friendly follow-up (do NOT repeat the original question verbatim)
 }
 
+BULK EXTRACTION MODE (no targeted slot):
+When no "CURRENT SLOT BEING ANSWERED" line appears in the system prompt, treat the
+user's message as an open brief. Extract EVERY slot you can infer — do not limit
+yourself to one. Populate slot_updates with all slots the message makes unambiguous.
+Then ask about the FIRST slot the user did not clearly specify.
+
 SLOT-TARGETED EXTRACTION:
 The caller will tell you which slot the user is currently being asked about
 (via a "CURRENT SLOT BEING ANSWERED" line in the system prompt). Treat the

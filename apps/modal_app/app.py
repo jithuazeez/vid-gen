@@ -201,10 +201,12 @@ class Sdxl:
 
     @modal.method()
     def character_ref(self, project_id: str, character_id: str, name: str,
-                      description: str, seed: int = 42) -> dict:
+                      description: str, seed: int = 42,
+                      frontal: bool = False) -> dict:
         from apps.modal_app.functions import character_refs
 
-        return character_refs.run(project_id, character_id, name, description, seed)
+        return character_refs.run(project_id, character_id, name, description,
+                                  seed=seed, frontal=frontal)
 
 
 @app.function(image=ltx_image, gpu="A100-40GB", volumes={"/models": models_volume},

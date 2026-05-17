@@ -192,7 +192,12 @@ async def astream(
                     early_question_slot = next_missing[0]
 
         seen_keys: set[str] = set()
-        async for kind, payload in _gemini_stream(msg, brief, target_slot):
+        # Use bulk extraction (no slot focus) when many slots are still missing so
+        # a rich first message can fill all slots in a single Gemini call instead
+        # of requiring one round-trip per slot.
+        bulk_mode = len(_missing_slots(brief)) >= 5
+        stream_target = None if bulk_mode else target_slot
+        async for kind, payload in _gemini_stream(msg, brief, stream_target):
             if kind == "partial_slots":
                 clean = _sanitize_slots(payload)
                 # Only forward keys we haven't already streamed.
@@ -708,9 +713,11 @@ async def _gemini_stream(
             f"Existing brief:\n{json.dumps(brief, default=str)}\n\n"
             f"User said:\n{user_message}\n\nReturn JSON only."
         )
+        # Omit response_mime_type so Gemini streams tokens immediately.
+        # JSON mode buffers the full object before flushing — removing it lets
+        # _extract_completed_pairs parse partial JSON as tokens arrive.
         config = types.GenerateContentConfig(
             system_instruction=sys,
-            response_mime_type="application/json",
             temperature=0.0,
         )
 

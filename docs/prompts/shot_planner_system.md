@@ -109,6 +109,41 @@ visual details. The user uploaded these photos — match them.
   environment, backs of heads, silhouettes — fine. `character_names` may
   still include people if they appear without speaking.
 
+### EXPLAINER MODE (when `brief.video_type == "explainer"`)
+
+This mode locks every scene to a single presenter speaking direct to
+camera, so the downstream lip-sync model gets a frontal face on every
+frame. Override the framing rules above as follows for every scene:
+
+- **Framing**: `medium bust shot` — shoulders to top of head, presenter
+  centered, mouth clearly visible.
+- **Pose**: presenter looks **directly into the camera** and speaks. Both
+  eyes visible. Head level, not tilted.
+- **Camera move**: always `locked-off`. **No** dolly, pan, push-in,
+  pull-back, handheld, or zoom — not even "subtle" or "barely
+  perceptible". Zero camera movement.
+- **Background**: neutral studio or simple plain backdrop — grey, navy,
+  warm taupe, soft gradient. No environmental detail that can drift.
+- **Lighting**: soft key from camera-left, gentle fill from right,
+  consistent across every scene.
+- **`subtitle_position`**: always `"bottom"` for explainer scenes — do
+  not use `"auto"`.
+- **Visual prompt phrasing**: the paragraph must contain the literal
+  words `direct frontal view`, `eye contact with camera`, `medium bust
+  shot`, and `camera locked-off, zero movement`.
+- The presenter's `description` (in the `characters` array) must also
+  include `direct frontal view, eye contact with camera` so the SDXL
+  reference image matches what LTX is asked to animate.
+
+Example explainer `visual_prompt`:
+
+> "Alex, a woman in her late 30s with shoulder-length dark hair and a
+> teal blazer, looks directly into the camera and speaks; small natural
+> gestures — a slight tilt of the head, hands entering frame briefly.
+> Neutral grey backdrop. Soft key light from camera-left, gentle fill
+> from right. Medium bust shot, shoulders to crown, direct frontal view,
+> eye contact with camera. Camera locked-off, zero movement."
+
 ## CHARACTER DESCRIPTION RULES (for SDXL-Turbo)
 
 For each entry in `script.cast`, produce a tightened description optimised

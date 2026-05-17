@@ -88,6 +88,7 @@ def run_i2v(
     fps: int = 24,
     seed: int = 42,
     negative_prompt: str | None = None,
+    guidance_scale: float | None = None,
 ) -> Path:
     width, height = _snap32(width), _snap32(height)
     out = Path(tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name)
@@ -114,7 +115,11 @@ def run_i2v(
     gen = torch.Generator(device="cuda").manual_seed(int(seed))
     num_frames = max(8, int(round(duration_s * fps)))
     steps = int(os.environ.get("LTX_NUM_INFERENCE_STEPS", "40"))
-    guidance = float(os.environ.get("LTX_GUIDANCE_SCALE", "3.0"))
+    guidance = (
+        guidance_scale
+        if guidance_scale is not None
+        else float(os.environ.get("LTX_GUIDANCE_SCALE", "3.0"))
+    )
 
     call_kwargs: dict[str, Any] = dict(
         image=cond,

@@ -134,6 +134,23 @@ verbatim. Treat every word as a performance instruction.
   (skin tone, hair, palette, one specific garment, posture). Keep the
   description identical wherever you reference the same name.
 
+### EXPLAINER MODE (when `brief.video_type == "explainer"`)
+
+This mode generates a presenter-to-camera explainer where the same single
+person speaks every beat. It exists so the downstream lip-sync model gets
+a reliable frontal face on every frame. Override the rules above as follows:
+
+- `cast` has **exactly one** member — the presenter. Give them a real
+  persona (name, age, look), not a generic "Presenter" label.
+- **Every** beat has `has_speaker: true` with `speaker_name` set to that
+  presenter. B-roll beats (`has_speaker: false`) are not allowed.
+- `narration_script` is written as the presenter's **direct-to-camera
+  voice** — first-person address, conversational, the way someone would
+  actually talk to the viewer. Not third-person voice-over.
+- `action` is incidental — the presenter is mostly just talking. Use it
+  for small natural gestures only ("tilts head slightly", "hands enter
+  frame briefly").
+
 ## HARD DON'Ts
 
 - **No camera language anywhere.** No "shot", "frame", "angle", "pan", "tilt",

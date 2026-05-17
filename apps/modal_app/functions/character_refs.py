@@ -7,10 +7,11 @@ from . import _common as cc
 MODEL_ID = "stabilityai/sdxl-turbo"
 
 
-def run(project_id: str, character_id: str, name: str, description: str, seed: int = 42) -> dict:
+def run(project_id: str, character_id: str, name: str, description: str,
+        seed: int = 42, frontal: bool = False) -> dict:
     h = st.content_hash({
         "character_id": character_id, "description": description,
-        "model": MODEL_ID, "seed": int(seed),
+        "model": MODEL_ID, "seed": int(seed), "frontal": bool(frontal),
     })
     cached = cc.cached_or(h)
     if cached:
@@ -28,11 +29,26 @@ def run(project_id: str, character_id: str, name: str, description: str, seed: i
 
     from ..models import sdxl
 
-    prompt = (
-        f"Cinematic portrait of {name}: {description}. "
-        f"Three-quarter view, soft natural light, neutral background, "
-        f"detailed face, photorealistic, 50mm lens, shallow depth of field."
-    )
+    if frontal:
+        # Explainer mode: this image is the first frame LTX will animate
+        # from, so the framing/pose must match the locked-off bust shot LTX
+        # is told to produce. Sharp face landmarks (no shallow DoF) so the
+        # downstream InsightFace detector in LipSync can lock on.
+        prompt = (
+            f"Professional studio portrait of {name}: {description}. "
+            f"Direct frontal view, both eyes visible, eye contact with camera, "
+            f"mouth closed in a neutral expression, head centered and level, "
+            f"no head tilt, no profile. Plain neutral grey studio backdrop. "
+            f"Soft key light from camera-left, gentle fill from right. "
+            f"Photorealistic, sharp focus across the entire face, 50mm lens, "
+            f"medium bust framing — shoulders to top of head, centered."
+        )
+    else:
+        prompt = (
+            f"Cinematic portrait of {name}: {description}. "
+            f"Three-quarter view, soft natural light, neutral background, "
+            f"detailed face, photorealistic, 50mm lens, shallow depth of field."
+        )
     local = sdxl.generate(prompt, width=768, height=768, seed=seed)
     key = st.asset_key(project_id=project_id, asset_type="character_ref",
                        short_hash=h[:8], extension="jpg",

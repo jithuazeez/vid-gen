@@ -60,6 +60,14 @@ def generate_storyboard(self, project_id: str, idempotency_key: str | None = Non
             prompt=sc["visual_prompt"],
         )))
 
+    # Explainer mode forces a frontal, locked-off bust shot so the
+    # downstream LipSync face detector can lock on every frame. The SDXL
+    # reference image is the first frame LTX animates from, so it has to
+    # match — flip the character_ref into frontal mode when the brief
+    # asks for explainer.
+    brief = project.get("brief") or {}
+    frontal = (brief.get("video_type") == "explainer")
+
     char_calls = []
     for ch in characters:
         char_calls.append((ch, sdxl_character_ref.spawn(
@@ -67,6 +75,7 @@ def generate_storyboard(self, project_id: str, idempotency_key: str | None = Non
             character_id=str(ch["id"]),
             name=ch["name"],
             description=ch["description"],
+            frontal=frontal,
         )))
 
     # Await both groups so the storyboard UI gets real thumbs and the

@@ -87,6 +87,30 @@ def _build_ltx_prompt(scene: dict, brief: dict) -> str:
     return " ".join(parts).strip()
 
 
+def _build_explainer_prompt(scene: dict, brief: dict) -> str:
+    """Build a locked-off, frontal LTX prompt for explainer mode.
+
+    The presenter speaks direct-to-camera in a stable bust-framed shot.
+    No camera movement, no head turning — every frame must contain a
+    frontal face so the downstream LipSync / InsightFace pipeline
+    detects reliably. The conditioning image (the SDXL character_ref,
+    generated with frontal=True) already sets the framing; this prompt
+    tells LTX to *hold* it.
+    """
+    duration = float(scene.get("duration_seconds") or 6.0)
+    return (
+        f"A locked-off {duration:.1f}-second medium bust shot of a "
+        "presenter looking directly into the camera and speaking. "
+        "Subtle natural facial expressions: small lip movements, "
+        "occasional gentle blinks, minimal head micro-movement. "
+        "Zero camera movement — stable tripod frame throughout. "
+        "Neutral studio backdrop. Soft key light from camera-left, "
+        "gentle fill from right. Photorealistic, broadcast newsreader "
+        "composition. The presenter remains centered, head level, "
+        "both eyes visible, face directly toward camera for the entire clip."
+    )
+
+
 # Negative prompt — explicit suppression of the failure modes we've
 # actually seen in renders: still-photo output, distorted faces, baked-in
 # captions, jitter. LTX 0.9.x respects negative prompts well.
@@ -96,6 +120,22 @@ NEGATIVE_PROMPT = (
     "low quality, blurry, distorted, deformed, watermark, text, caption, "
     "subtitle, cropped subject, cut-off head, extra limbs, warped face, "
     "jittery motion, flicker, jpeg artifacts, oversaturated, washed out"
+)
+
+
+# Explainer mode reverses several of the defaults: we *want* a near-still
+# subject (presenter holds frame) and we explicitly reject any of the
+# camera moves and angle changes that would break frontal face detection.
+NEGATIVE_PROMPT_EXPLAINER = (
+    "profile view, three-quarter view, side view, head turned, "
+    "head turning away, looking away, head tilted, dutch tilt, "
+    "hand near face, hand on chin, microphone in frame, "
+    "dolly, pan, push-in, pull-back, zoom, handheld, camera shake, "
+    "motion blur, cinematic angle, low angle, high angle, wide shot, "
+    "environmental shot, multiple people, crowd, background motion, "
+    "low quality, blurry, distorted, deformed, watermark, text, caption, "
+    "subtitle, cropped subject, cut-off head, warped face, "
+    "flicker, jpeg artifacts"
 )
 
 
@@ -110,7 +150,13 @@ def run(project_id: str, scene_id: str) -> dict:
     seed = int(scene.get("seed") or 42)
     duration = float(scene.get("duration_seconds") or 6.0)
     brief = scene.get("brief") or {}
-    prompt = _build_ltx_prompt(scene, brief)
+    is_explainer = (brief.get("video_type") == "explainer")
+    prompt = (
+        _build_explainer_prompt(scene, brief)
+        if is_explainer
+        else _build_ltx_prompt(scene, brief)
+    )
+    negative = NEGATIVE_PROMPT_EXPLAINER if is_explainer else NEGATIVE_PROMPT
 
     # Architecture.md §6: include character_ref_hashes so re-rolling a
     # character invalidates dependent scene videos.
@@ -122,13 +168,14 @@ def run(project_id: str, scene_id: str) -> dict:
     h = st.content_hash({
         "scene_id": scene_id,
         "prompt": prompt,
-        "negative_prompt": NEGATIVE_PROMPT,
+        "negative_prompt": negative,
         "character_ref_hashes": char_ref_hashes,
         "duration_s": duration,
         "width": width,
         "height": height,
         "model": MODEL_REVISION,
         "seed": seed,
+        "explainer": is_explainer,
         "v": os.environ.get("CACHE_VERSION", "v3"),
     })
     cached = cc.cached_or(h)
@@ -144,20 +191,33 @@ def run(project_id: str, scene_id: str) -> dict:
     # if the thumbnail step never ran. Using the thumbnail keeps shot
     # framing, set, lighting, and character placement consistent with
     # what the user reviewed on the storyboard.
+    #
+    # Explainer mode skips the thumbnail and always uses the frontal
+    # character_ref — every scene must be the same locked-off bust shot
+    # of the same presenter, and the per-scene thumbnails would pull each
+    # scene toward a different composition.
     cond_key = None
-    thumb = cc.fetch_asset_by_type(
-        project_id=str(scene.get("project_id") or project_id),
-        scene_id=scene_id, asset_type="thumbnail", language=None,
-    )
-    if thumb:
-        cond_key = thumb["storage_key"]
-    else:
+    if is_explainer:
         char_ref = cc.fetch_asset_by_type(
             project_id=str(scene.get("project_id") or project_id),
             scene_id=None, asset_type="character_ref", language=None,
         )
         if char_ref:
             cond_key = char_ref["storage_key"]
+    else:
+        thumb = cc.fetch_asset_by_type(
+            project_id=str(scene.get("project_id") or project_id),
+            scene_id=scene_id, asset_type="thumbnail", language=None,
+        )
+        if thumb:
+            cond_key = thumb["storage_key"]
+        else:
+            char_ref = cc.fetch_asset_by_type(
+                project_id=str(scene.get("project_id") or project_id),
+                scene_id=None, asset_type="character_ref", language=None,
+            )
+            if char_ref:
+                cond_key = char_ref["storage_key"]
 
     cond_path = cc.download_to_tmp(cond_key) if cond_key else None
 
@@ -165,12 +225,13 @@ def run(project_id: str, scene_id: str) -> dict:
 
     local = ltx.run_i2v(
         prompt=prompt,
-        negative_prompt=NEGATIVE_PROMPT,
+        negative_prompt=negative,
         conditioning_image_path=cond_path,
         duration_s=duration,
         width=width,
         height=height,
         seed=seed,
+        guidance_scale=4.5 if is_explainer else None,
     )
     key = st.asset_key(project_id=project_id, asset_type="scene_video",
                        short_hash=h[:8], extension="mp4",
