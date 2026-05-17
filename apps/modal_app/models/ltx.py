@@ -51,9 +51,12 @@ def load():
         torch_dtype=torch.bfloat16,
         cache_dir="/models/ltx2",
     )
-    # 19B model on A100-40GB: sequential offload is the supported config.
+    # 19B model on A100-40GB: model-level CPU offload moves whole sub-modules
+    # (text encoder → transformer → VAE) on/off GPU rather than swapping
+    # individual layers. ~5–10× faster than sequential offload while still
+    # fitting 40GB because only one sub-module is GPU-resident at a time.
     # Do *not* `.to("cuda")` — that defeats the offloader.
-    _pipeline.enable_sequential_cpu_offload()
+    _pipeline.enable_model_cpu_offload()
 
     _maybe_attach_lora(_pipeline)
     return _pipeline

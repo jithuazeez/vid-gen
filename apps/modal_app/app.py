@@ -81,6 +81,10 @@ ltx_image = (
     .env({
         "HF_HOME": "/models/hf",
         "HUGGINGFACE_HUB_CACHE": "/models/hf",
+        # Latency-tuned defaults: STG off (saves an extra forward pass per
+        # step) and 20 steps instead of 30. Override per-run via env.
+        "LTX2_NUM_INFERENCE_STEPS": "20",
+        "LTX2_STG_SCALE": "0",
     })
     .add_local_python_source("apps")
 )
@@ -153,7 +157,7 @@ def sdxl_character_ref(project_id: str, character_id: str, name: str,
 
 
 @app.function(image=ltx_image, gpu="A100-40GB", volumes={"/models": models_volume},
-              secrets=secrets, timeout=900)
+              secrets=secrets, timeout=1800)
 def ltx_render(project_id: str, scene_id: str) -> dict:
     from apps.modal_app.functions import scene_video
 
