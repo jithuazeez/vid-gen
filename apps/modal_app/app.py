@@ -85,6 +85,9 @@ ltx_image = (
         # step) and 20 steps instead of 30. Override per-run via env.
         "LTX2_NUM_INFERENCE_STEPS": "20",
         "LTX2_STG_SCALE": "0",
+        # Reduce CUDA allocator fragmentation under the 19B working set —
+        # cheap insurance on top of the A100-80GB headroom.
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     })
     .add_local_python_source("apps")
 )
@@ -156,7 +159,7 @@ def sdxl_character_ref(project_id: str, character_id: str, name: str,
     return character_refs.run(project_id, character_id, name, description, seed)
 
 
-@app.function(image=ltx_image, gpu="A100-40GB", volumes={"/models": models_volume},
+@app.function(image=ltx_image, gpu="A100-80GB", volumes={"/models": models_volume},
               secrets=secrets, timeout=1800)
 def ltx_render(project_id: str, scene_id: str) -> dict:
     from apps.modal_app.functions import scene_video

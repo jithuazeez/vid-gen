@@ -51,12 +51,22 @@ def load():
         torch_dtype=torch.bfloat16,
         cache_dir="/models/ltx2",
     )
-    # 19B model on A100-40GB: model-level CPU offload moves whole sub-modules
+    # 19B model on A100-80GB: model-level CPU offload moves whole sub-modules
     # (text encoder → transformer → VAE) on/off GPU rather than swapping
-    # individual layers. ~5–10× faster than sequential offload while still
-    # fitting 40GB because only one sub-module is GPU-resident at a time.
+    # individual layers — ~5–10× faster than sequential offload. The 80GB
+    # card has headroom for the transformer (~38GB) plus activations.
     # Do *not* `.to("cuda")` — that defeats the offloader.
     _pipeline.enable_model_cpu_offload()
+    # VAE decode of a multi-frame latent is the second-largest memory spike.
+    # Tiling + slicing trade a tiny bit of decode time for a big activation
+    # reduction; both are no-ops if the VAE doesn't implement them.
+    for fn_name in ("enable_vae_tiling", "enable_vae_slicing"):
+        fn = getattr(_pipeline, fn_name, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:  # pragma: no cover — best effort
+                pass
 
     _maybe_attach_lora(_pipeline)
     return _pipeline
