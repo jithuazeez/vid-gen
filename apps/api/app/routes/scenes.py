@@ -79,13 +79,6 @@ async def patch_scene(
     for k, v in body.model_dump(exclude_unset=True).items():
         if k == "duration_seconds" and v is not None:
             scene.duration_seconds = Decimal(str(v))
-        elif k == "has_speaker" and v:
-            # Hard-coded off until lip-sync is installed. The musetalk
-            # image doesn't ship the model, so accepting True here would
-            # cause every render of that project to fail with
-            # LipSyncNotInstalled (see apps/modal_app/models/musetalk.py).
-            # The UI hides the toggle but we guard server-side too.
-            scene.has_speaker = False
         else:
             setattr(scene, k, v)
     await session.commit()
@@ -116,8 +109,7 @@ async def create_scene(
         duration_seconds=Decimal(str(body.duration_seconds)),
         visual_prompt=body.visual_prompt,
         narration_script=body.narration_script,
-        # Force off until lip-sync ships. See patch_scene() above.
-        has_speaker=False,
+        has_speaker=bool(body.has_speaker),
     )
     session.add(scene)
     await session.commit()

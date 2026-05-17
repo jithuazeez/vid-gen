@@ -111,12 +111,7 @@ def _normalize_scene(s: dict[str, Any]) -> dict[str, Any]:
             s.get("narration_script") or s.get("narration") or s.get("script")
             or s.get("voiceover") or s.get("voice_over") or s.get("narrator_text") or ""
         ),
-        # has_speaker is force-disabled while lip-sync is unimplemented.
-        # See apps/modal_app/models/musetalk.py for the full story; once a
-        # real lip-sync model is installed, revert this to
-        # ``s.get("has_speaker", False)`` and re-enable the storyboard UI
-        # toggle in apps/web/components/Storyboard/index.tsx.
-        "has_speaker": False,
+        "has_speaker": bool(s.get("has_speaker", False)),
         "character_names": s.get("character_names") or [],
         "subtitle_position": subtitle_position,
     }
@@ -276,8 +271,7 @@ def _merge_script_and_shots(
             **s,
             "duration_seconds": beat.get("duration_seconds") or s.get("duration_seconds"),
             "narration_script": beat.get("narration_script") or s.get("narration_script"),
-            # Force-disabled — see _normalize_scene above.
-            "has_speaker": False,
+            "has_speaker": bool(s.get("has_speaker", False)),
         })
     return {"scenes": scenes_out, "characters": shots.get("characters", [])}
 
@@ -314,8 +308,6 @@ def _fallback_plan(brief: dict[str, Any]) -> dict[str, Any]:
                 "Camera: shoulder height. Lighting: cinematic, soft fill."
             ),
             "narration_script": _narration_for(i, n, topic, tone),
-            # Force-disabled while lip-sync is unimplemented. See
-            # apps/modal_app/models/musetalk.py.
             "has_speaker": False,
             "subtitle_position": "auto",
         })

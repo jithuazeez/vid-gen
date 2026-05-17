@@ -1,15 +1,19 @@
-"""MuseTalk lip-sync — per scene, per language. Gated by `scene.has_speaker`.
+"""Lip-sync — per scene, per language. Gated by `scene.has_speaker`.
 
-If the scene has no speaker we return None without spinning the GPU model.
-The DAG is unchanged either way (composite_scene checks for the asset and
-falls back to the silent scene_video on miss).
+Backend is LatentSync (see ``apps/modal_app/models/musetalk.py`` — name
+kept for callsite stability). If the scene has no speaker we return None
+without spinning the GPU model. The DAG is unchanged either way
+(composite_scene checks for the asset and falls back to the silent
+scene_video on miss).
 """
 from __future__ import annotations
 
 from .. import storage as st
 from . import _common as cc
 
-MODEL = "musetalk-1.0"
+# Cache key — bump when the lip-sync model or its inference defaults
+# change in a way that should invalidate previously rendered clips.
+MODEL = "latentsync-1.6-stage2"
 
 
 def run(project_id: str, scene_id: str, language: str) -> dict | None:

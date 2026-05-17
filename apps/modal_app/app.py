@@ -78,10 +78,57 @@ ltx_image = (
     })
     .add_local_python_source("apps")
 )
-musetalk_image = _cpu_base.pip_install(
-    "torch==2.4.0", "opencv-python-headless==4.10.0.84",
-    "ffmpeg-python==0.2.0", "librosa==0.10.2",
-).add_local_python_source("apps")
+# Lip-sync via ByteDance LatentSync. The repo is a script project (not a
+# pip package), so we git-clone it into the image at a pinned SHA and add
+# the checkout to PYTHONPATH so ``from latentsync.pipelines... import
+# LipsyncPipeline`` resolves. Picked over MuseTalk because LatentSync's
+# dependency tree is clean diffusers/transformers (no openmmlab/mmcv).
+# Picked over Wav2Lip because LatentSync ships visibly higher quality
+# (audio-conditioned latent diffusion vs. pixel-space CNN).
+#
+# Default config is ``stage2.yaml`` (256x256, ~8 GB VRAM, the LatentSync
+# 1.5 inference path). To upgrade to 1.6 quality (512x512, ~18 GB VRAM),
+# set ``LATENTSYNC_UNET_CONFIG=configs/unet/stage2_512.yaml`` in the
+# image env — same checkpoint, different resolution.
+LATENTSYNC_REPO_SHA = "a229c3948406bc2cf6eaf4873e662e70c6a04746"  # 2025-06-20
+musetalk_image = (
+    _cpu_base
+    .apt_install("git", "libgl1")
+    .pip_install(
+        # Match LatentSync's pinned requirements.txt exactly to avoid
+        # subtle numerics drift from version mismatches.
+        "torch==2.5.1", "torchvision==0.20.1",
+        "diffusers==0.32.2", "transformers==4.48.0",
+        "decord==0.6.0", "accelerate==0.26.1", "einops==0.7.0",
+        "omegaconf==2.3.0", "opencv-python==4.9.0.80",
+        "mediapipe==0.10.11", "python_speech_features==0.6",
+        "librosa==0.10.1", "scenedetect==0.6.1",
+        "ffmpeg-python==0.2.0", "imageio==2.31.1",
+        "imageio-ffmpeg==0.5.1", "lpips==0.1.4",
+        "face-alignment==1.4.1", "huggingface-hub==0.30.2",
+        "numpy==1.26.4", "kornia==0.8.0", "insightface==0.7.3",
+        "onnxruntime-gpu==1.21.0", "DeepCache==0.1.1",
+        extra_options="--extra-index-url https://download.pytorch.org/whl/cu121",
+    )
+    .run_commands(
+        f"git clone https://github.com/bytedance/LatentSync /opt/latentsync && "
+        f"cd /opt/latentsync && git checkout {LATENTSYNC_REPO_SHA}",
+    )
+    .env({
+        "HF_HOME": "/models/hf",
+        "HUGGINGFACE_HUB_CACHE": "/models/hf",
+        # PYTHONPATH lets `import latentsync` resolve to the clone. CWD
+        # matters because the inference pipeline reads relative paths
+        # (configs/, latentsync/utils/mask.png).
+        "PYTHONPATH": "/opt/latentsync",
+        "LATENTSYNC_REPO_DIR": "/opt/latentsync",
+        "LATENTSYNC_CKPT_DIR": "/models/latentsync/checkpoints",
+        "LATENTSYNC_UNET_CONFIG": "configs/unet/stage2.yaml",
+        "LATENTSYNC_INFERENCE_STEPS": "20",
+        "LATENTSYNC_GUIDANCE_SCALE": "1.5",
+    })
+    .add_local_python_source("apps")
+)
 # faster-whisper / ctranslate2 dlopen libcublas.so.12 and libcudnn.so.8 at
 # first GPU call. debian_slim ships neither, so we pull them in as pip
 # wheels and add their lib dirs to LD_LIBRARY_PATH. cuDNN must be the 8.x
@@ -175,8 +222,13 @@ def generate_voice(project_id: str, scene_id: str, language: str) -> dict:
     return voice.run(project_id, scene_id, language)
 
 
+# LatentSync lip-sync. Timeout sized for first-call cold path: ~3-5 min
+# weight download (latentsync_unet.pt ~5 GB + whisper/tiny.pt) on first
+# invocation against a fresh volume, then ~30-60 s pipeline init, then
+# ~10 s/scene inference. scaledown_window keeps the container warm so
+# subsequent scenes in the same project reuse the loaded pipeline.
 @app.function(image=musetalk_image, gpu="A10G", volumes={"/models": models_volume},
-              secrets=secrets, timeout=300)
+              secrets=secrets, timeout=900, scaledown_window=300)
 def musetalk_sync(project_id: str, scene_id: str, language: str,
                    has_speaker: bool = True) -> dict | None:
     if not has_speaker:
