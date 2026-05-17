@@ -111,6 +111,11 @@ def regen_language(self, project_id: str, language: str,
         quality="1080p", subtitles_mode="burned",
     )
     db.append_available_language(project_id, language)
-    db.update_job(job_id, status="succeeded", current_stage="done")
-    publish_event(project_id, "done", {"language": language, "export": export_result})
+    export_asset_id = export_result.get("asset_id") if isinstance(export_result, dict) else None
+    db.update_job(
+        job_id, status="succeeded", current_stage="done",
+        progress={"percent": 100, "final_export_asset_id": export_asset_id},
+    )
+    publish_event(project_id, "done", {"language": language, "export": export_result,
+                                       "final_export_asset_id": export_asset_id})
     return job_id

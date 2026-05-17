@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Asset-type metadata ────────────────────────────────────────────────
 # Maps the Modal function name to (asset_type, file extension, mime type).
-# `mediapipe_face` and `ping` deliberately omitted — they don't produce assets.
+# `ping` deliberately omitted — it doesn't produce an asset.
 
 _ASSET_TYPE_BY_FN: dict[str, tuple[str, str, str]] = {
     "sdxl_thumbnail":     ("thumbnail",     "png", "image/png"),
@@ -35,6 +35,7 @@ _ASSET_TYPE_BY_FN: dict[str, tuple[str, str, str]] = {
     "ltx_render":         ("scene_video",   "mp4", "video/mp4"),
     "musetalk_sync":      ("lipsync_video", "mp4", "video/mp4"),
     "whisper_align":      ("subtitle_srt",  "srt", "application/x-subrip"),
+    "mediapipe_face":     ("face_data",     "json", "application/json"),
     "ffmpeg_composite":   ("composite",     "mp4", "video/mp4"),
     "generate_voice":     ("voice",         "wav", "audio/wav"),
     "final_export":       ("final_export",  "mp4", "video/mp4"),
@@ -200,8 +201,8 @@ def materialise(fn_name: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:
     `asset_id`) so the rest of the pipeline doesn't have to special-case stubs.
 
     Returns the plain `{"stub": True, ...}` shape for functions that don't
-    produce assets (`ping`, `mediapipe_face`) or when required identifiers
-    (project_id) are missing.
+    produce assets (`ping`) or when required identifiers (project_id) are
+    missing.
     """
     # musetalk only fires when has_speaker=True; mirror the real signature.
     if fn_name == "musetalk_sync" and not kwargs.get("has_speaker", True):

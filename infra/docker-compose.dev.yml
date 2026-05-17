@@ -49,7 +49,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       API_BASE_URL: http://api:8000
       MODAL_STUB: "0"
-      MUSIC_DISABLE: "0"
+      # Music generation (ACE-Step) is parked while we iterate on the LTX
+      # pipeline. Set MUSIC_DISABLE=0 to re-enable; the rest of the
+      # composite pipeline still handles a music asset gracefully if one
+      # turns up in the database.
+      MUSIC_DISABLE: "1"
 
   web:
     build:

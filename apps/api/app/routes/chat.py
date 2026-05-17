@@ -309,8 +309,11 @@ async def _apply_scene_edit(
     if scene is None:
         return False
     if field == "has_speaker":
-        value = bool(value) if not isinstance(value, str) else (
-            value.strip().lower() in {"true", "yes", "on", "1"})
+        # Hard-coded off until lip-sync is installed; see
+        # apps/modal_app/models/musetalk.py. Chat edits like "make scene 3
+        # on camera" silently no-op so the assistant doesn't queue up
+        # rendering that will fail with LipSyncNotInstalled.
+        value = False
     setattr(scene, field, value)
     await session.commit()
     return True

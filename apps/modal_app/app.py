@@ -43,7 +43,7 @@ secrets.append(modal.Secret.from_dict({"VIDPLATFORM_VERSION": "0.1.0"}))
 
 _cpu_base = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg", "libsndfile1", "git")
+    .apt_install("ffmpeg", "libsndfile1")
     .pip_install(
         "redis==5.2.0", "boto3==1.35.50",
         "psycopg[binary]==3.2.3", "sqlalchemy==2.0.36",
@@ -59,35 +59,22 @@ sdxl_image = _cpu_base.pip_install(
     "torch==2.4.0", "diffusers==0.30.3", "transformers==4.45.2",
     "accelerate==0.34.2", "safetensors==0.4.5",
 ).add_local_python_source("apps")
-# LTX-2 (19B) via diffusers `LTX2ConditionPipeline`. Pinned by commit SHA
-# because the pipeline lives on diffusers main and the API is still
-# settling — a floating pin will eventually bite us.
-LTX2_DIFFUSERS_REF = os.environ.get(
-    "LTX2_DIFFUSERS_REF",
-    "git+https://github.com/huggingface/diffusers.git@main",
-)
+# LTX-Video 0.9.x via diffusers. We tried Lightricks's native LTX-2.3
+# pipeline (`ltx-core` + `ltx-pipelines`) and gave up after three
+# cascading upstream packaging bugs in a row (CUDA-13 torchaudio in their
+# loose pins, an unshipped `multigpu/` subdirectory, a transformers
+# SiglipVisionModel.vision_model rename). The 0.9.x line is older and
+# weaker on motion, but it loads cleanly via stock diffusers and we can
+# squeeze quality out of it via prompt design + an optional LoRA.
 ltx_image = (
     _cpu_base.pip_install(
-        "torch==2.5.1", "torchaudio==2.5.1",
-        # LTX-2 uses Gemma3 as its text encoder — added to transformers in
-        # 4.50.0. The pipeline lives on diffusers main, so we pair it with
-        # a recent transformers release that includes Gemma3.
-        "transformers==4.50.0", "tokenizers>=0.21",
-        "imageio[ffmpeg]==2.36.0", "accelerate>=1.4.0",
-        "sentencepiece==0.2.0", "soundfile>=0.12",
-        "peft>=0.14",
+        "torch==2.4.0", "diffusers==0.32.2", "transformers==4.45.2",
+        "imageio[ffmpeg]==2.36.0", "accelerate==0.34.2", "sentencepiece==0.2.0",
+        "peft>=0.13",  # required by diffusers' LoRA loader
     )
-    .pip_install(LTX2_DIFFUSERS_REF)
     .env({
         "HF_HOME": "/models/hf",
         "HUGGINGFACE_HUB_CACHE": "/models/hf",
-        # Latency-tuned defaults: STG off (saves an extra forward pass per
-        # step) and 20 steps instead of 30. Override per-run via env.
-        "LTX2_NUM_INFERENCE_STEPS": "20",
-        "LTX2_STG_SCALE": "0",
-        # Reduce CUDA allocator fragmentation under the 19B working set —
-        # cheap insurance on top of the A100-80GB headroom.
-        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     })
     .add_local_python_source("apps")
 )
@@ -137,30 +124,44 @@ def ping(project_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-# Note: the Modal Function name (`sdxl_thumbnail`) and the image variable
-# (`sdxl_image`) are intentionally different — the image gets passed as
-# `image=sdxl_image`, the Function gets looked up by name from the Celery
-# worker via `modal.Function.from_name`.
+# SDXL-Turbo is shared by `thumbnail` and `character_ref`. We host both as
+# methods on a single `@app.cls` so the pipeline loads exactly once per
+# container via `@modal.enter`, then services every scene's thumbnails and
+# the project's character_refs from the same warm GPU. With
+# `scaledown_window=120` the container survives the full render's image
+# phase, so the 10–15s cold-load tax is paid once per project instead of
+# once per call.
+#
+# Worker callers look these up via `modal.Cls.from_name("vidplatform", "Sdxl")`
+# and invoke `.thumbnail.spawn(...)` / `.character_ref.spawn(...)`.
 
-@app.function(image=sdxl_image, gpu="A10G", volumes={"/models": models_volume},
-              secrets=secrets, timeout=120, name="sdxl_thumbnail")
-def sdxl_thumbnail(project_id: str, scene_id: str, prompt: str, seed: int = 42) -> dict:
-    from apps.modal_app.functions import thumbnails
+@app.cls(image=sdxl_image, gpu="A10G", volumes={"/models": models_volume},
+         secrets=secrets, timeout=180, scaledown_window=120)
+class Sdxl:
+    @modal.enter()
+    def _load(self) -> None:
+        # Warms the module-level singleton in models/sdxl.py so subsequent
+        # method calls in this container skip cold load.
+        from apps.modal_app.models import sdxl as sdxl_model
 
-    return thumbnails.run(project_id, scene_id, prompt, seed)
+        sdxl_model.load()
+
+    @modal.method()
+    def thumbnail(self, project_id: str, scene_id: str, prompt: str, seed: int = 42) -> dict:
+        from apps.modal_app.functions import thumbnails
+
+        return thumbnails.run(project_id, scene_id, prompt, seed)
+
+    @modal.method()
+    def character_ref(self, project_id: str, character_id: str, name: str,
+                      description: str, seed: int = 42) -> dict:
+        from apps.modal_app.functions import character_refs
+
+        return character_refs.run(project_id, character_id, name, description, seed)
 
 
-@app.function(image=sdxl_image, gpu="A10G", volumes={"/models": models_volume},
-              secrets=secrets, timeout=180, name="sdxl_character_ref")
-def sdxl_character_ref(project_id: str, character_id: str, name: str,
-                       description: str, seed: int = 42) -> dict:
-    from apps.modal_app.functions import character_refs
-
-    return character_refs.run(project_id, character_id, name, description, seed)
-
-
-@app.function(image=ltx_image, gpu="A100-80GB", volumes={"/models": models_volume},
-              secrets=secrets, timeout=1800)
+@app.function(image=ltx_image, gpu="A100-40GB", volumes={"/models": models_volume},
+              secrets=secrets, timeout=600)
 def ltx_render(project_id: str, scene_id: str) -> dict:
     from apps.modal_app.functions import scene_video
 
@@ -195,10 +196,22 @@ def whisper_align(project_id: str, scene_id: str, language: str) -> dict:
 
 @app.function(image=mediapipe_image, cpu=2, secrets=secrets, timeout=60)
 def mediapipe_face(project_id: str, scene_id: str) -> dict:
-    """Standalone MediaPipe pass — kept for cases where we want face data
-    without doing a full subtitle pass (e.g. overlay placement). Subtitles
-    runs its own face detect inline.
+    """Run MediaPipe face detection on a scene_video and persist the result
+    as a ``face_data`` asset. Consumers (overlay auto-placement, subtitle
+    fallback) query the assets table by ``(scene_id, asset_type='face_data')``
+    and read ``metadata.position_hint`` / ``metadata.frames``.
+
+    Subtitles still runs its own face-detect inline for the moment, but
+    that path falls back to ``"bottom"`` when nothing's cached; once this
+    asset exists it can be reused without re-decoding the video. The
+    standalone path also fires for non-speaker scenes (those don't run
+    whisper_align), so overlays get face data for every scene.
     """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from apps.modal_app import storage as st
     from apps.modal_app.functions import _common as cc
     from apps.modal_app.models import mediapipe_face as mpf
 
@@ -207,13 +220,45 @@ def mediapipe_face(project_id: str, scene_id: str) -> dict:
         asset_type="scene_video", language=None,
     )
     if not sv:
-        return {"position_hint": "bottom"}
+        return {"position_hint": "bottom", "asset_id": None}
+
+    h = st.content_hash({
+        "scene_video_storage_key": sv.get("storage_key"),
+        "kind": "face_data",
+        "v": os.environ.get("CACHE_VERSION", "v3"),
+    })
+    cached = cc.cached_or(h)
+    if cached:
+        cc.publish(project_id, "asset_progress",
+                   {"asset_type": "face_data", "scene_id": scene_id,
+                    "percent": 100, "cache_hit": True})
+        return {**cached, "position_hint": (cached.get("metadata") or {}).get("position_hint", "bottom")}
+
     sv_path = cc.download_to_tmp(sv["storage_key"])
     res = mpf.detect(sv_path)
+
+    # Persist the JSON blob so consumers can fetch it without re-running
+    # the detector. The asset's metadata also carries position_hint so
+    # cheap lookups (overlay placement) don't need to download the file.
+    out = Path(tempfile.NamedTemporaryFile(suffix=".json", delete=False).name)
+    out.write_text(json.dumps(res), encoding="utf-8")
+    key = st.asset_key(project_id=project_id, asset_type="face_data",
+                       short_hash=h[:8], extension="json",
+                       scene_index=scene_id)
+    bytes_ = st.upload_file(out, key, "application/json")
+    record = st.register_asset(
+        project_id=project_id, scene_id=scene_id,
+        asset_type="face_data", language=None,
+        storage_key=key, content_hash_value=h,
+        bytes_=bytes_, mime_type="application/json",
+        metadata={"position_hint": res.get("position_hint", "bottom"),
+                  "sample_count": len(res.get("frames") or [])},
+    )
     cc.publish(project_id, "asset_progress",
                {"asset_type": "face_data", "scene_id": scene_id,
-                "percent": 100, "position_hint": res.get("position_hint")})
-    return res
+                "percent": 100, "position_hint": res.get("position_hint"),
+                "asset_id": record.get("asset_id")})
+    return {**record, "position_hint": res.get("position_hint", "bottom")}
 
 
 @app.function(image=cpu_image, cpu=4, secrets=secrets, timeout=300)

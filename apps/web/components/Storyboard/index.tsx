@@ -88,13 +88,18 @@ export function SceneCard({
           “{scene.narration_script}”
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+          {/* Lip-sync isn't installed in the musetalk image yet, so every
+              scene runs voice-over only. The toggle is disabled to keep
+              users from queueing renders that would fail with
+              LipSyncNotInstalled. See apps/modal_app/models/musetalk.py. */}
           <Chip
-            onClick={() => onToggleSpeaker()}
-            selected={scene.has_speaker}
+            disabled
+            selected={false}
             icon={<Mic size={12} />}
-            style={{ height: 26, fontSize: 12 }}
+            style={{ height: 26, fontSize: 12, opacity: 0.5, cursor: "not-allowed" }}
+            title="Lip-sync coming soon"
           >
-            {scene.has_speaker ? "On camera" : "Voice-over"}
+            Voice-over
           </Chip>
           <Mono dim size={11}>subs: {scene.subtitle_position}</Mono>
         </div>
@@ -145,14 +150,14 @@ export function SceneDetailPanel({
                     style={{ marginTop: 6, minHeight: 110 }} />
         </div>
 
-        <div>
+        <div style={{ opacity: 0.5, pointerEvents: "none" }}>
           <Label>Speaking on camera</Label>
           <RadioGroup
-            value={speaker}
-            onChange={(v) => setSpeaker(v as "on" | "off")}
+            value="off"
+            onChange={() => { /* disabled — lip-sync not installed */ }}
             options={[
-              { value: "off", label: "Off", hint: "Lip-sync skipped for this scene." },
-              { value: "on", label: "On", hint: "MuseTalk syncs mouth to narration audio." },
+              { value: "off", label: "Off", hint: "All scenes run voice-over only." },
+              { value: "on", label: "On (coming soon)", hint: "Lip-sync model not yet installed." },
             ]}
             style={{ marginTop: 6 }}
           />
@@ -174,7 +179,7 @@ export function SceneDetailPanel({
           <Button style={{ marginLeft: "auto" }} onClick={() => onSave({
             narration_script: script,
             visual_prompt: prompt,
-            has_speaker: speaker === "on",
+            // has_speaker omitted — UI is disabled, server forces False.
             subtitle_position: sub,
           })}>
             <Edit size={14} /> Save changes

@@ -27,6 +27,7 @@ from worker.modal_client import (
     final_export,
     generate_voice,
     ltx_render,
+    mediapipe_face,
     musetalk_sync,
     whisper_align,
 )
@@ -177,6 +178,31 @@ def render_project(self, project_id: str, language: str | None = None,
             publish_event(project_id, "scene_ready",
                           {"scene_id": sid, "kind": "scene_video",
                            "asset_id": aid, "asset_url": signed_url_for_asset(aid)})
+
+        # ─── Phase B-1b: face detection for overlay/subtitle placement ──
+        # Runs after every scene_video exists. Cheap (CPU, ~5–10s per
+        # scene); spawned in parallel and drained together so total wall
+        # time is ~1 scene's worth. Result is persisted as a face_data
+        # asset; overlay creation reads position_hint from it.
+        face_calls = []
+        for s in scenes:
+            sid = str(s["id"])
+            face_calls.append((sid, mediapipe_face.spawn(
+                project_id=project_id, scene_id=sid,
+            )))
+        _record_modal_calls(job_id, {
+            "mediapipe_face": [c for c in (_call_id(call) for _, call in face_calls) if c],
+        })
+        for sid, call in face_calls:
+            try:
+                call.get()
+            except Exception as exc:
+                # Face detection is best-effort — a failure shouldn't fail
+                # the whole render. Overlay placement falls back to a
+                # static default; subtitles already handle missing data.
+                log.warning("mediapipe.failed", project_id=project_id,
+                            job_id=job_id, scene_id=sid, error=str(exc))
+
         publish_event(project_id, "progress", {"percent": 40})
         log.info("phase.b1.done", project_id=project_id, job_id=job_id)
 

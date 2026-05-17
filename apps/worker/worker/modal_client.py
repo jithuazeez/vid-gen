@@ -33,6 +33,26 @@ def _lookup(fn_name: str):
         return _StubFunction(fn_name)
 
 
+def _lookup_cls_method(cls_name: str, method_name: str, stub_alias: str):
+    """Bind a method on a Modal class. ``stub_alias`` is the function name
+    the fixture stub knows (matches the pre-class-conversion function
+    name) so fixture-mode callers keep working unchanged.
+    """
+    if _STUB:
+        return _StubFunction(stub_alias)
+    try:
+        import modal  # type: ignore
+
+        cls = modal.Cls.from_name(MODAL_APP_NAME, cls_name)
+        # Instantiate the lazy reference; for our parameterless class this
+        # is effectively free and gives us a bound method handle that
+        # exposes .spawn()/.remote() just like a Function.
+        method = getattr(cls(), method_name)
+        return _SafeModalFunction(stub_alias, method)
+    except Exception:
+        return _StubFunction(stub_alias)
+
+
 class _SafeModalFunction:
     """Wraps a real Modal Function so that spawn/remote errors fall back to stub."""
 
@@ -108,8 +128,11 @@ class _StubCall:
 
 # Public Modal function bindings — names match @app.function(name=...)
 ping             = _lookup("ping")
-sdxl_thumbnail   = _lookup("sdxl_thumbnail")
-sdxl_character_ref = _lookup("sdxl_character_ref")
+# SDXL thumbnail and character_ref are now methods on a single @app.cls
+# (class name "Sdxl"). Fixture-stub aliases keep the legacy function names
+# so apps/worker/worker/fixtures.py can still resolve the right payload.
+sdxl_thumbnail     = _lookup_cls_method("Sdxl", "thumbnail",     "sdxl_thumbnail")
+sdxl_character_ref = _lookup_cls_method("Sdxl", "character_ref", "sdxl_character_ref")
 ltx_render       = _lookup("ltx_render")
 musetalk_sync    = _lookup("musetalk_sync")
 whisper_align    = _lookup("whisper_align")
