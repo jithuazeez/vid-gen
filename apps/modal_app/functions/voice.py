@@ -10,7 +10,7 @@ import re
 
 from .. import storage as st
 from ..providers import sarvam
-from . import _common as cc
+from . import _audio, _common as cc
 
 TTS_MODEL = "bulbul:v2"
 
@@ -82,15 +82,16 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
     raw_script = scene.get("narration_script") or ""
     script = clean_for_tts(raw_script)
     tone = (scene.get("brief") or {}).get("narration_tone", "calm")
+    scene_duration_s = float(scene.get("duration_seconds") or 0.0)
 
     text = sarvam.translate(script, source_lang=source_lang, target_lang=language)
 
     h = st.content_hash({
         "scene_id": scene_id, "language": language, "text": text,
         "tone": tone, "model": TTS_MODEL,
-        # Bumped when speaker-label stripping landed so prior renders
-        # that voiced "ALICE: ..." get re-synthesised.
-        "v": os.environ.get("CACHE_VERSION", "v3"),
+        "duration_s": scene_duration_s,
+        # Bumped when scene-length audio alignment landed.
+        "v": os.environ.get("CACHE_VERSION", "v4"),
     })
     cached = cc.cached_or(h)
     if cached:
@@ -100,6 +101,9 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
         return cached
 
     wav_path = sarvam.synthesize_speech(text, language, tone=tone)
+    align_meta: dict = {"action": "skip"}
+    if scene_duration_s > 0:
+        wav_path, align_meta = _audio.align_to_duration(str(wav_path), scene_duration_s)
     key = st.asset_key(project_id=project_id, asset_type="voice",
                        short_hash=h[:8], extension="wav",
                        scene_index=scene_id, language=language)
@@ -109,7 +113,8 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
         asset_type="voice", language=language,
         storage_key=key, content_hash_value=h,
         bytes_=bytes_, mime_type="audio/wav",
-        metadata={"model": TTS_MODEL, "tone": tone, "translated_from": source_lang},
+        metadata={"model": TTS_MODEL, "tone": tone, "translated_from": source_lang,
+                  "alignment": align_meta},
     )
     cc.publish(project_id, "asset_progress",
                {"asset_type": "voice", "scene_id": scene_id,

@@ -77,6 +77,15 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
     else:
         audio_source = "silent"
 
+    # Target output length: the scene's logical duration. The underlying
+    # scene_video may be longer (non-final scenes carry ~1s of transition
+    # runway — see scene_video.run), and the aligned voice WAV may differ
+    # by a small residual; clamp both with -t so the composite is exactly
+    # scene_duration seconds. The export step relies on each composite
+    # being exactly this length when building the xfade chain.
+    scene_row = cc.fetch_scene(scene_id)
+    target_duration_s = float((scene_row or {}).get("duration_seconds") or 0.0) or None
+
     out = Path(tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name)
     _run_ffmpeg(
         video_in=base_video,
@@ -84,6 +93,7 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
         audio_source=audio_source,
         srt_in=srt_path,
         out=str(out),
+        target_duration_s=target_duration_s,
     )
 
     key = st.asset_key(project_id=project_id, asset_type=STAGE,
@@ -106,7 +116,7 @@ def run(project_id: str, scene_id: str, language: str) -> dict:
 
 def _run_ffmpeg(
     *, video_in: str, audio_in: str | None, audio_source: str,
-    srt_in: str | None, out: str,
+    srt_in: str | None, out: str, target_duration_s: float | None = None,
 ) -> None:
     cmd = ["ffmpeg", "-y", "-i", video_in]
     if audio_in:
@@ -139,8 +149,15 @@ def _run_ffmpeg(
         cmd += ["-map", audio_label]
     cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p",
             "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-            "-shortest", out]
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]
+    # Clamp to the scene's logical duration when we know it. -shortest
+    # remains the right behaviour only for the silent case where there's
+    # no audio to align against and we trust the video length.
+    if target_duration_s and target_duration_s > 0:
+        cmd += ["-t", f"{target_duration_s:.3f}"]
+    elif audio_label is None:
+        cmd += ["-shortest"]
+    cmd += [out]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(

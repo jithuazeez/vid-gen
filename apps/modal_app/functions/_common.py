@@ -51,6 +51,16 @@ def fetch_project(project_id: str) -> dict[str, Any] | None:
     )
 
 
+def fetch_scene_count(project_id: str) -> int:
+    """Total scene count for a project — used to detect the final scene
+    (which gets no transition runway appended)."""
+    row = _query_one(
+        "SELECT COUNT(*)::int AS n FROM scenes WHERE project_id = %s",
+        (project_id,),
+    )
+    return int(row["n"]) if row else 0
+
+
 def fetch_character_ref_hashes(project_id: str) -> list[str]:
     """All character_ref content hashes for a project, sorted for stable hashing.
 
