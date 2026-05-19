@@ -6,7 +6,12 @@ import os
 from .. import storage as st
 from . import _common as cc
 
-MODEL_REVISION = "ltxv-13b-0.9.7-distilled-fp8+motion-prompt-v1"
+MODEL_REVISION = "ltxv-13b-0.9.7-distilled-fp8+motion-prompt-v2+runway-v1"
+
+# Extra seconds of camera-motion runway appended to every non-final,
+# non-explainer scene. Consumed by the xfade overlap in final_export so
+# the visible scene length matches the scene's logical duration.
+TRANSITION_RUNWAY_S = 1.0
 
 
 def _dims_for_aspect(aspect: str | None) -> tuple[int, int]:
@@ -28,7 +33,8 @@ def _dims_for_aspect(aspect: str | None) -> tuple[int, int]:
     return table.get(a, (768, 448))
 
 
-def _build_ltx_prompt(scene: dict, brief: dict) -> str:
+def _build_ltx_prompt(scene: dict, brief: dict, *, has_runway: bool = False,
+                      render_duration_s: float | None = None) -> str:
     """Build a motion-first LTX prompt.
 
     LTX 0.9.x is heavily weighted toward the leading tokens of the prompt
@@ -43,17 +49,22 @@ def _build_ltx_prompt(scene: dict, brief: dict) -> str:
     narration = (scene.get("narration_script") or "").strip()
     style = (brief or {}).get("visual_style") or "cinematic"
     tone = (brief or {}).get("narration_tone") or "natural"
-    duration = float(scene.get("duration_seconds") or 6.0)
+    duration = float(render_duration_s if render_duration_s is not None
+                     else (scene.get("duration_seconds") or 6.0))
 
     parts: list[str] = []
 
-    # 1. Lead with motion. This is the most important sentence for LTX
-    #    — it sets the model's expectation that we want a *video*, not
-    #    an animated still.
+    # 1. Lead with motion — larger magnitude than before. LTX 0.9.x
+    #    weights the leading tokens heavily, so this is where we earn
+    #    visible camera movement. The previous "smoothly / gentle /
+    #    subtle" wording produced near-still output.
     parts.append(
-        f"A continuous {duration:.1f}-second cinematic shot with deliberate, "
-        "readable motion: the camera glides smoothly (slow dolly, gentle pan, "
-        "or subtle push-in) while the subject performs a clear physical action."
+        f"A continuous {duration:.1f}-second cinematic shot with pronounced, "
+        "clearly-visible camera motion: the camera executes a confident move "
+        "— a bold dolly push-in, a wide arc around the subject, a fast "
+        "tracking pan, or a crane rise — covering meaningful distance across "
+        "the shot. Strong parallax. Foreground elements sweep past. The "
+        "subject performs a clear physical action."
     )
 
     # 2. Storyboard description, restructured to put action verbs early
@@ -80,9 +91,21 @@ def _build_ltx_prompt(scene: dict, brief: dict) -> str:
     parts.append(
         f"Visual style: {style}. Mood: {tone}. Motivated lighting, "
         "shallow depth of field, 35mm-equivalent lens look, photoreal "
-        "textures, naturalistic colour grade. The frame stays in motion "
-        "for the entire clip — no freeze frames, no static stills."
+        "textures, naturalistic colour grade. Pronounced camera motion "
+        "throughout — every second of the clip shows the framing changing. "
+        "No freeze frames, no static stills."
     )
+
+    if has_runway:
+        # Last ~1s of the clip is consumed by an xfade overlap into the
+        # next scene's opening. Telling LTX to ease into an outward move
+        # gives the crossfade something cinematic to work with instead
+        # of crossfading mid-action.
+        parts.append(
+            "The final beat of the shot eases into an outward motion — "
+            "the camera drifts back, pans off, or pushes through — "
+            "leaving the frame ready to cut cleanly to the next shot."
+        )
 
     return " ".join(parts).strip()
 
@@ -116,7 +139,9 @@ def _build_explainer_prompt(scene: dict, brief: dict) -> str:
 # captions, jitter. LTX 0.9.x respects negative prompts well.
 NEGATIVE_PROMPT = (
     "still photo, static frame, frozen image, animated still, "
-    "no motion, motionless subject, "
+    "no motion, motionless subject, locked-off camera, tripod shot, "
+    "static framing, minimal motion, barely perceptible movement, "
+    "slow motion, "
     "low quality, blurry, distorted, deformed, watermark, text, caption, "
     "subtitle, cropped subject, cut-off head, extra limbs, warped face, "
     "jittery motion, flicker, jpeg artifacts, oversaturated, washed out"
@@ -151,10 +176,22 @@ def run(project_id: str, scene_id: str) -> dict:
     duration = float(scene.get("duration_seconds") or 6.0)
     brief = scene.get("brief") or {}
     is_explainer = (brief.get("video_type") == "explainer")
+
+    # Non-final, non-explainer scenes get a transition-runway tail so the
+    # final-export xfade has something to crossfade with. Explainer mode
+    # keeps a locked-off frame for lipsync — no runway, no xfade.
+    project_id_for_count = str(scene.get("project_id") or project_id)
+    scene_idx = int(scene.get("scene_index") or 0)
+    total_scenes = cc.fetch_scene_count(project_id_for_count)
+    is_final_scene = (scene_idx >= total_scenes - 1) if total_scenes > 0 else True
+    has_runway = (not is_explainer) and (not is_final_scene)
+    render_duration = duration + (TRANSITION_RUNWAY_S if has_runway else 0.0)
+
     prompt = (
         _build_explainer_prompt(scene, brief)
         if is_explainer
-        else _build_ltx_prompt(scene, brief)
+        else _build_ltx_prompt(scene, brief, has_runway=has_runway,
+                               render_duration_s=render_duration)
     )
     negative = NEGATIVE_PROMPT_EXPLAINER if is_explainer else NEGATIVE_PROMPT
 
@@ -170,7 +207,9 @@ def run(project_id: str, scene_id: str) -> dict:
         "prompt": prompt,
         "negative_prompt": negative,
         "character_ref_hashes": char_ref_hashes,
-        "duration_s": duration,
+        "duration_s": render_duration,
+        "logical_duration_s": duration,
+        "has_runway": has_runway,
         "width": width,
         "height": height,
         "model": MODEL_REVISION,
@@ -227,7 +266,7 @@ def run(project_id: str, scene_id: str) -> dict:
         prompt=prompt,
         negative_prompt=negative,
         conditioning_image_path=cond_path,
-        duration_s=duration,
+        duration_s=render_duration,
         width=width,
         height=height,
         seed=seed,
@@ -242,7 +281,8 @@ def run(project_id: str, scene_id: str) -> dict:
         asset_type="scene_video", language=None,
         storage_key=key, content_hash_value=h,
         bytes_=bytes_, mime_type="video/mp4",
-        metadata={"model": MODEL_REVISION, "duration_s": duration},
+        metadata={"model": MODEL_REVISION, "duration_s": render_duration,
+                  "logical_duration_s": duration, "has_runway": has_runway},
     )
     cc.publish(project_id, "asset_progress",
                {"asset_type": "scene_video", "scene_id": scene_id,
